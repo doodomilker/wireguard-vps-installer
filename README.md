@@ -13,20 +13,26 @@ Generates server config, a default client, prints conf + QR code + scp command, 
 - **Global `wgmgr` command**: interactive menu for adding/removing clients, viewing config, downloading, restart, uninstall
 - **OS support**: Debian 11+ / Ubuntu 20.04+ / CentOS Stream 8/9 (CentOS 7 EOL — not supported)
 
-## Quick start
+## Two install modes
+
+### A) Online one-liner (recommended for fresh VPS)
 
 ```bash
-# On a fresh VPS (Debian/Ubuntu/CentOS Stream), as root:
 curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh | sudo bash
 ```
 
-Or local clone:
+### B) Offline git clone (for restricted networks / air-gapped VPS)
 
 ```bash
 git clone https://github.com/doodomilker/wireguard-vps-installer.git
 cd wireguard-vps-installer
 sudo ./install.sh
 ```
+
+After `git clone`, **all script files are local** — `install.sh` never reaches
+out to the internet for code. It still calls `apt-get install` / `dnf install`
+to pull wireguard packages, which is unavoidable unless you pre-download
+the .deb/.rpm files and use `dpkg -i` / `rpm -i` instead.
 
 ## After install
 

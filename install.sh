@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # wireguard-vps-installer — one-shot install (standalone, self-contained)
-# Usage: curl -fsSL .../install.sh | sudo bash
+# Usage A (online):  curl -fsSL .../install.sh | sudo bash
+# Usage B (offline): git clone https://github.com/doodomilker/wireguard-vps-installer.git
+#                   && cd wireguard-vps-installer && sudo ./install.sh
 # Note: not using 'set -u' because we have many optional CLI flags
 set -eo pipefail
 
