@@ -62,13 +62,17 @@ read_server_state() {
         msg_err "No server config at ${WG_CONF}"
         exit 1
     fi
-    SERVER_PUBLIC="$(grep -E '^#?PublicKey' "${WG_CONF}" | awk '{print $3}' | head -1)"
+    # Try to read public key from conf first, else fallback to wg show
+    SERVER_PUBLIC="$(grep -E '^#?PublicKey' "${WG_CONF}" 2>/dev/null | awk '{print $3}' | head -1 || true)"
+    if [[ -z "${SERVER_PUBLIC}" ]] && has_cmd wg; then
+        SERVER_PUBLIC="$(wg show wg0 public-key 2>/dev/null || true)"
+    fi
     if [[ -z "${SERVER_PUBLIC}" ]]; then
-        msg_err "Could not parse server public key from ${WG_CONF}"
+        msg_err "Could not parse server public key from ${WG_CONF} or wg show"
         exit 1
     fi
-    SERVER_PORT="$(grep -E '^ListenPort' "${WG_CONF}" | awk '{print $3}')"
-    SERVER_ADDRESS="$(grep -E '^Address' "${WG_CONF}" | awk '{print $3}' | head -1)"
+    SERVER_PORT="$(grep -E '^ListenPort' "${WG_CONF}" | awk '{print $3}' || true)"
+    SERVER_ADDRESS="$(grep -E '^Address' "${WG_CONF}" | awk '{print $3}' | head -1 || true)"
     PUBLIC_IP="${PUBLIC_IP:-}"
     if [[ -z "${PUBLIC_IP}" ]] && has_cmd curl; then
         PUBLIC_IP="$(curl -4 -fsSL --max-time 5 https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || echo "")"
