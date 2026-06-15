@@ -82,14 +82,16 @@ check_os_supported() {
     case "${OS_ID}" in
         debian)
             # 11+ supported
-            if [[ -n "${OS_VERSION}" ]] && (( OS_VERSION < 11 )); then
+            local major="${OS_VERSION%%.*}"
+            if [[ -n "${major}" ]] && (( major < 11 )); then
                 msg_err "Debian ${OS_VERSION} is EOL. Please use Debian 11 or 12."
                 exit 3
             fi
             ;;
         ubuntu)
             # 20.04+ supported
-            if [[ -n "${OS_VERSION}" ]] && (( OS_VERSION < 2004 )); then
+            local major="${OS_VERSION%%.*}"
+            if [[ -n "${major}" ]] && (( major < 20 )); then
                 msg_err "Ubuntu ${OS_VERSION} is EOL. Please use Ubuntu 20.04 or newer."
                 exit 3
             fi
@@ -103,7 +105,8 @@ check_os_supported() {
             ;;
         fedora)
             # 39+ supported
-            if [[ -n "${OS_VERSION}" ]] && (( OS_VERSION < 39 )); then
+            local major="${OS_VERSION%%.*}"
+            if [[ -n "${major}" ]] && (( major < 39 )); then
                 msg_err "Fedora ${OS_VERSION} is EOL. Please use Fedora 39 or newer."
                 exit 3
             fi
