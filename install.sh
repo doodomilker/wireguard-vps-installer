@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# wireguard-vps-installer — one-shot install for Debian/Ubuntu/CentOS Stream
+# Usage: sudo ./install.sh [--port N] [--subnet CIDR] [--dns LIST] [--endpoint IP:PORT] [--no-psk] [--expose-download]
+#
+# This script is meant to be runnable via `curl ... | sudo bash`, so it embeds
+# the lib/* functions inline (no dependency on a local checkout).
+
+set -euo pipefail
+
+# ---------- Embedded lib (single-file friendly) ----------
+# We embed by sourcing relative paths when running from a checkout,
+# or fall back to inline minimal copies if piped via curl.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo ".")"
+
+# Source libs if available, else error out clearly
+if [[ -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/lib/common.sh"
+    source "${SCRIPT_DIR}/lib/network.sh"
+    source "${SCRIPT_DIR}/lib/server.sh"
+    source "${SCRIPT_DIR}/lib/client.sh"
+else
+    # curl | bash path: libs are NOT available locally. Embed minimal stubs.
+    # This branch is reserved for future enhancement; for v1 we require a checkout.
+    echo "[✗] lib/ not found next to install.sh." >&2
+    echo "    Either clone the repo and run ./install.sh, or wait for v2 (inline libs)." >&2
+    exit 1
+fi
+
+# ---------- Defaults ----------
+WG_PORT="${WG_PORT_DEFAULT}"
+WG_SUBNET="${WG_SUBNET_DEFAULT}"
+WG_DNS="${WG_DNS_DEFAULT}"
+SERVER_ENDPOINT_OVERRIDE=""
+USE_PSK=1
+EXPOSE_DOWNLOAD=0
+SKIP_INSTALL=0
+
+# ---------- Parse args ----------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --port)            WG_PORT="$2"; shift 2 ;;
+        --subnet)          WG_SUBNET="$2"; shift 2 ;;
+        --dns)             WG_DNS="$2"; shift 2 ;;
+        --endpoint)        SERVER_ENDPOINT_OVERRIDE="$2"; shift 2 ;;
+        --no-psk)          USE_PSK=0; shift ;;
+        --expose-download) EXPOSE_DOWNLOAD=1; shift ;;
+        --public)          EXPOSE_DOWNLOAD=1; shift ;;
+        --dryrun)          DRYRUN=1; shift ;;
+        -h|--help)
+            cat <<EOF
+Usage: sudo $0 [OPTIONS]
+
+Options:
+  --port N              UDP ListenPort (default 51820)
+  --subnet CIDR         WireGuard subnet, /24 recommended (default 10.0.0.0/24)
+  --dns LIST            Comma-separated DNS for clients (default "1.1.1.1, 8.8.8.8")
+  --endpoint IP:PORT    Override detected public endpoint
+  --no-psk              Skip generating preshared keys
+  --expose-download     Bind temporary HTTP download server on 0.0.0.0 (default 127.0.0.1)
+  --dryrun              Print actions without making changes
+  -h, --help            This message
+EOF
+            exit 0
+            ;;
+        *)
+            msg_err "Unknown arg: $1 (try --help)"
+            exit 1
+            ;;
+    esac
+done
+
+# ---------- Banner ----------
+msg_banner "wireguard-vps-installer"
+echo "  Config: port=${WG_PORT}  subnet=${WG_SUBNET}  dns=${WG_DNS}  psk=${USE_PSK}"
+echo ""
+
+# ---------- Pre-flight ----------
+require_root
+detect_os
+check_os_supported
+msg_ok "OS: ${OS_PRETTY}  (pkg: ${PKG_MANAGER})"
+
+# ---------- Idempotency: if already installed, prompt ----------
+if [[ -f "${WG_CONF}" && "${DRYRUN}" != "1" ]]; then
+    msg_warn "Existing WireGuard install detected at ${WG_CONF}"
+    if ! confirm "Reconfigure? (This will add a new client and reload wg0)" "N"; then
+        msg_info "Aborting."
+        exit 0
+    fi
+fi
+
+# ---------- Install packages ----------
+msg_step "Installing WireGuard and helpers"
+
+WG_REQUIRED_PKGS=()
+case "${PKG_MANAGER}" in
+    apt)
+        WG_REQUIRED_PKGS=(wireguard qrencode iptables-persistent)
+        ;;
+    dnf)
+        # Enable EPEL for qrencode on RHEL-based
+        if ! has_cmd qrencode; then
+            dnf install -y epel-release || msg_warn "epel-release install failed (qrencode may not be available)"
+        fi
+        WG_REQUIRED_PKGS=(wireguard-tools qrencode iptables-services)
+        ;;
+esac
+
+run pkg_install "${WG_REQUIRED_PKGS[@]}"
+
+# ---------- Detect public IP ----------
+msg_step "Detecting public endpoint"
+
+if [[ -n "${SERVER_ENDPOINT_OVERRIDE}" ]]; then
+    PUBLIC_IP="${SERVER_ENDPOINT_OVERRIDE%:*}"
+    WG_PORT="${SERVER_ENDPOINT_OVERRIDE##*:}"
+    msg_info "Using override endpoint: ${PUBLIC_IP}:${WG_PORT}"
+else
+    if ! detect_public_ip; then
+        msg_err "Cannot detect public IPv4 and no --endpoint given."
+        exit 1
+    fi
+fi
+
+# Sanity: port not in use
+if ! port_is_free "${WG_PORT}"; then
+    msg_warn "Port ${WG_PORT} appears to be in use on this host."
+    if ! confirm "Continue anyway?" "N"; then
+        exit 1
+    fi
+fi
+
+# ---------- Generate server keys ----------
+msg_step "Generating server keys"
+
+# Load kernel module on dnf systems (apt loads it automatically via wireguard-dkms)
+if [[ "${PKG_MANAGER}" == "dnf" ]]; then
+    run modprobe wireguard 2>/dev/null || true
+fi
+
+run gen_keypair "SERVER"
+SERVER_PRIVATE="${SERVER_PRIVATE}"
+SERVER_PUBLIC="${SERVER_PUBLIC}"
+
+# ---------- Write server conf ----------
+run write_server_conf "${SERVER_PRIVATE}" "${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}"
+
+# ---------- IP forwarding + NAT ----------
+run enable_ip_forward
+run apply_nat_rules "${WG_SUBNET}" "eth0"
+
+# ---------- Enable + start wg-quick ----------
+if ! run enable_and_start_wg; then
+    if [[ "${DRYRUN}" != "1" ]]; then
+        msg_err "wg-quick@wg0 failed to start. Check: journalctl -u wg-quick@wg0"
+        exit 1
+    fi
+fi
+
+# ---------- Generate first client ----------
+msg_step "Generating default client 'client1'"
+
+run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
+
+# ---------- Install wgmgr globally ----------
+msg_step "Installing wgmgr command"
+
+if [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
+    run install -m 0755 "${SCRIPT_DIR}/wgmgr" /usr/local/bin/wgmgr
+    msg_ok "Installed /usr/local/bin/wgmgr"
+else
+    msg_warn "wgmgr script not found at ${SCRIPT_DIR}/wgmgr — skipping global install"
+fi
+
+# ---------- Print summary ----------
+SERVER_ENDPOINT="${PUBLIC_IP}:${WG_PORT}"
+print_server_summary "${SERVER_PUBLIC}" "${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${SERVER_ENDPOINT}"
+
+# ---------- Final reminder ----------
+msg_step "NEXT STEPS"
+cat <<EOF
+  1) Open UDP ${WG_PORT} in your cloud provider's security group
+     (AWS / DO / Vultr / Aliyun / Tencent — see docs/cloud-firewall.md)
+  2) Import client1.conf on your device:
+       - Phone:  scan the QR code above with the WireGuard app
+       - Mac/Win/Linux:  scp root@${PUBLIC_IP}:${WG_CLIENTS_DIR:-/etc/wireguard/clients}/client1.conf ./
+  3) Manage clients anytime:  sudo wgmgr
+EOF
+
+msg_ok "Install complete."

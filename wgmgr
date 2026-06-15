@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# wgmgr — global command-line / menu for managing wireguard-vps-installer installs
+# Installed by install.sh to /usr/local/bin/wgmgr
+#
+# All interactive input is "type number, press Enter" — no arrow keys, no Tab.
+# Destructive ops (remove / uninstall) require an extra y/N confirmation by default.
+# Pass --yes (or -y) to skip the y/N prompt (intended for scripts / cron).
+
+set -euo pipefail
+
+# ---------- lib discovery ----------
+_LIB_DIR=""
+for candidate in \
+    "${WG_INSTALL_LIB_DIR:-}" \
+    "/usr/local/share/wgmgr/lib" \
+    "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/lib" \
+    "/etc/wireguard/.wgmgr/lib"; do
+    if [[ -n "${candidate}" && -f "${candidate}/common.sh" ]]; then
+        _LIB_DIR="${candidate}"
+        break
+    fi
+done
+
+if [[ -z "${_LIB_DIR}" ]]; then
+    echo "[✗] wgmgr: lib/ not found. Please reinstall via install.sh." >&2
+    echo "    Searched: /usr/local/share/wgmgr/lib, /etc/wireguard/.wgmgr/lib, script-relative lib/" >&2
+    exit 1
+fi
+
+# shellcheck disable=SC1091
+source "${_LIB_DIR}/common.sh"
+source "${_LIB_DIR}/network.sh"
+source "${_LIB_DIR}/server.sh"
+source "${_LIB_DIR}/client.sh"
+
+WG_DIR="/etc/wireguard"
+WG_CONF="${WG_DIR}/wg0.conf"
+WG_CLIENTS_DIR="${WG_DIR}/clients"
+
+# ---------- Global flag parsing (--yes / -y to skip y/N) ----------
+ASSUME_YES=0
+WG_ARGS=()
+for arg in "$@"; do
+    case "${arg}" in
+        --yes|-y) ASSUME_YES=1 ;;
+        *)        WG_ARGS+=("${arg}") ;;
+    esac
+done
+# Re-export args back to $@
+set -- "${WG_ARGS[@]+"${WG_ARGS[@]}"}"
+
+# ---------- Helpers ----------
+require_installed() {
+    if [[ ! -f "${WG_CONF}" ]]; then
+        msg_err "WireGuard not installed at ${WG_CONF}. Run install.sh first."
+        exit 1
+    fi
+}
+
+read_server_state() {
+    if [[ ! -f "${WG_CONF}" ]]; then
+        msg_err "No server config at ${WG_CONF}"
+        exit 1
+    fi
+    SERVER_PUBLIC="$(grep -E '^#?PublicKey' "${WG_CONF}" | awk '{print $3}' | head -1)"
+    if [[ -z "${SERVER_PUBLIC}" ]]; then
+        msg_err "Could not parse server public key from ${WG_CONF}"
+        exit 1
+    fi
+    SERVER_PORT="$(grep -E '^ListenPort' "${WG_CONF}" | awk '{print $3}')"
+    SERVER_ADDRESS="$(grep -E '^Address' "${WG_CONF}" | awk '{print $3}' | head -1)"
+    PUBLIC_IP="${PUBLIC_IP:-}"
+    if [[ -z "${PUBLIC_IP}" ]] && has_cmd curl; then
+        PUBLIC_IP="$(curl -4 -fsSL --max-time 5 https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || echo "")"
+    fi
+    if [[ -n "${PUBLIC_IP}" ]]; then
+        SERVER_ENDPOINT="${PUBLIC_IP}:${SERVER_PORT}"
+    else
+        SERVER_ENDPOINT="<your-vps-ip>:${SERVER_PORT}"
+    fi
+    if [[ "${SERVER_ADDRESS}" =~ ^([0-9.]+)/ ]]; then
+        ip="${BASH_REMATCH[1]}"
+        SERVER_SUBNET="${ip%.*}.0/24"
+    else
+        SERVER_SUBNET="10.0.0.0/24"
+    fi
+    if [[ -d "${WG_CLIENTS_DIR}" ]]; then
+        SERVER_DNS="$(grep -hE '^DNS' "${WG_CLIENTS_DIR}"/*.conf 2>/dev/null | head -1 | awk '{print $3}' || echo "1.1.1.1, 8.8.8.8")"
+        [[ -z "${SERVER_DNS}" ]] && SERVER_DNS="1.1.1.1, 8.8.8.8"
+    else
+        SERVER_DNS="1.1.1.1, 8.8.8.8"
+    fi
+}
+
+# Print a number-prompt, read a line, return the input.
+# Usage: prompt "Label: " [default]
+prompt() {
+    local label="$1"
+    local default="${2:-}"
+    local reply
+    if [[ -n "${default}" ]]; then
+        read -r -p "${label} [${default}]: " reply
+        reply="${reply:-${default}}"
+    else
+        read -r -p "${label}: " reply
+    fi
+    printf '%s' "${reply}"
+}
+
+# Confirm y/N prompt. Honors --yes / -y. Non-interactive stdin defaults to N.
+confirm_destructive() {
+    local label="$1"
+    if [[ "${ASSUME_YES}" == "1" ]]; then
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        # No TTY (piped input) — assume N for safety
+        return 1
+    fi
+    local reply
+    read -r -p "${label} [y/N]: " reply
+    case "${reply}" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------- Subcommands ----------
+cmd_list() {
+    require_installed
+    msg_banner "Current clients"
+    list_clients
+}
+
+cmd_add() {
+    require_installed
+    read_server_state
+    local name="${1:-}"
+    if [[ -z "${name}" ]]; then
+        name="$(prompt 'Client name (e.g. iphone, mac, router)')"
+    fi
+    if [[ -z "${name}" ]]; then
+        msg_err "Client name required."
+        exit 1
+    fi
+    deliver_client "${name}" "${SERVER_PUBLIC}" "${SERVER_ENDPOINT}" "${SERVER_SUBNET}" "${SERVER_DNS}" 1
+    if [[ "${DRYRUN}" != "1" ]]; then
+        local conf="${WG_CLIENTS_DIR}/${name}.conf"
+        local client_pub client_ip psk
+        client_pub="$(grep -E '^PublicKey' "${conf}" | awk '{print $3}' | head -1)"
+        client_ip="$(grep -E '^Address' "${conf}" | awk '{print $3}' | head -1 | cut -d/ -f1)"
+        psk="$(grep -E '^PresharedKey' "${conf}" | awk '{print $3}' || true)"
+
+        add_peer_to_server "${name}" "${client_pub}" "${client_ip}" "${psk}"
+
+        if has_cmd wg; then
+            local args=(set wg0 peer "${client_pub}" allowed-ips "${client_ip}/32")
+            if [[ -n "${psk}" ]]; then
+                args+=(preshared-key <(printf '%s' "${psk}"))
+            fi
+            wg "${args[@]}" 2>/dev/null || systemctl reload wg-quick@wg0 2>/dev/null || true
+        else
+            systemctl reload wg-quick@wg0 2>/dev/null || true
+        fi
+        msg_ok "Peer '${name}' active on running interface"
+    fi
+}
+
+cmd_remove() {
+    require_installed
+    local name="${1:-}"
+    if [[ -z "${name}" ]]; then
+        name="$(prompt 'Client name to remove')"
+    fi
+    if [[ -z "${name}" ]]; then
+        msg_err "Client name required."
+        exit 1
+    fi
+    local conf="${WG_CLIENTS_DIR}/${name}.conf"
+    if [[ ! -f "${conf}" ]]; then
+        msg_err "Client '${name}' does not exist (no conf at ${conf})"
+        return 1
+    fi
+    # Show what we're about to remove
+    local client_ip
+    client_ip="$(grep -E '^Address' "${conf}" | awk '{print $3}' | head -1)"
+    echo ""
+    msg_warn "About to remove:"
+    echo "  Name: ${name}"
+    echo "  IP:   ${client_ip}"
+    echo "  conf: ${conf}"
+    echo "  png:  ${WG_CLIENTS_DIR}/${name}.png"
+    if ! confirm_destructive "Confirm remove '${name}'?"; then
+        msg_info "Aborted."
+        return 0
+    fi
+    # Live remove from wg0 first
+    if has_cmd wg; then
+        local client_pub
+        client_pub="$(grep -E '^PublicKey' "${conf}" | awk '{print $3}' | head -1)"
+        if [[ -n "${client_pub}" ]]; then
+            wg set wg0 peer "${client_pub}" remove 2>/dev/null || true
+        fi
+    fi
+    remove_client "${name}"
+}
+
+cmd_qr() {
+    require_installed
+    local name="${1:-}"
+    if [[ -z "${name}" ]]; then
+        name="$(prompt 'Client name')"
+    fi
+    local conf="${WG_CLIENTS_DIR}/${name}.conf"
+    if [[ ! -f "${conf}" ]]; then
+        msg_err "Client '${name}' not found."
+        exit 1
+    fi
+    echo "── conf ──────────────────────────────────────────"
+    cat "${conf}"
+    echo "──────────────────────────────────────────────────"
+    render_qr_terminal "${conf}"
+}
+
+cmd_config() {
+    require_installed
+    read_server_state
+    print_server_summary "${SERVER_PUBLIC}" "${SERVER_PORT}" "${SERVER_SUBNET}" "${SERVER_DNS}" "${SERVER_ENDPOINT}"
+}
+
+cmd_status() {
+    require_installed
+    msg_banner "WireGuard Service Status"
+    if has_cmd wg; then
+        wg show
+    fi
+    echo ""
+    if has_cmd systemctl; then
+        systemctl status wg-quick@wg0.service --no-pager || true
+    fi
+}
+
+cmd_restart() {
+    require_installed
+    if has_cmd systemctl; then
+        systemctl restart wg-quick@wg0.service
+        msg_ok "Restarted wg-quick@wg0"
+    else
+        msg_err "systemctl not available"
+        exit 1
+    fi
+}
+
+cmd_uninstall() {
+    if ! confirm_destructive "This will STOP the VPN and REMOVE all keys, clients, iptables rules. Continue?"; then
+        msg_info "Aborted."
+        return 0
+    fi
+    local candidates=(
+        "/usr/local/share/wgmgr/uninstall.sh"
+        "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/uninstall.sh"
+        "./uninstall.sh"
+    )
+    for c in "${candidates[@]}"; do
+        if [[ -f "${c}" ]]; then
+            msg_info "Running ${c}"
+            exec bash "${c}" "$@"
+        fi
+    done
+    msg_err "Could not find uninstall.sh. Run it manually from the repo."
+    exit 1
+}
+
+# ---------- Numbered sub-menus ----------
+# 2) 获取下载链接 — re-implemented as a numeric sub-menu
+submenu_download() {
+    require_installed
+    read_server_state
+    local cname
+
+    echo ""
+    echo "  请选择下载方式:"
+    echo "  1) 终端 ASCII 二维码"
+    echo "  2) PNG 图片路径"
+    echo "  3) base64 文本"
+    echo "  0) 返回上级"
+    echo ""
+    local fmt
+    fmt="$(prompt '请输入选项 [0-3]')"
+    case "${fmt}" in
+        0|"") return 0 ;;
+        1|2|3) ;;
+        *) msg_warn "无效选项"; return 1 ;;
+    esac
+
+    cname="$(prompt 'Client name' 'client1')"
+    local conf="${WG_CLIENTS_DIR}/${cname}.conf"
+    if [[ ! -f "${conf}" ]]; then
+        msg_err "Client '${cname}' not found"
+        return 1
+    fi
+    case "${fmt}" in
+        1)
+            echo "── conf ──────────────────────────────────────────"
+            cat "${conf}"
+            echo "──────────────────────────────────────────────────"
+            render_qr_terminal "${conf}"
+            ;;
+        2)
+            local png="${WG_CLIENTS_DIR}/${cname}.png"
+            if [[ -f "${png}" ]]; then
+                echo ""
+                echo "  PNG 路径: ${png}"
+                echo "  下载命令: scp root@${PUBLIC_IP:-<vps-ip>}:${png} ./"
+            else
+                msg_warn "PNG 不存在. 用: wgmgr qr ${cname} 重生成"
+            fi
+            ;;
+        3)
+            echo "── base64 ─────────────────────────────────────"
+            base64 "${conf}"
+            echo "────────────────────────────────────────────────"
+            echo "  客户端解码: base64 -d > ${cname}.conf"
+            ;;
+    esac
+}
+
+# 5) 删除账户 — number-prompt for client name + final y/N
+submenu_remove() {
+    require_installed
+    echo ""
+    msg_banner "Select client to remove"
+    list_clients
+    echo ""
+    cmd_remove ""   # asks for name + y/N inside
+}
+
+# ---------- Top-level menu ----------
+show_menu() {
+    require_installed
+    read_server_state
+
+    local choice
+    while true; do
+        msg_banner "wgmgr — WireGuard Manager"
+        echo "  Endpoint: ${SERVER_ENDPOINT}  Subnet: ${SERVER_SUBNET}  Port: ${SERVER_PORT}"
+        echo ""
+        cat <<'EOF'
+  1) 查看当前账户
+  2) 获取下载链接
+  3) 查看各项配置
+  4) 添加新账户
+  5) 删除账户
+  6) 查看服务状态
+  7) 重启服务
+  8) 卸载 wireguard
+  9) 退出
+EOF
+        echo ""
+        choice="$(prompt '请输入选项 [1-9]')"
+        case "${choice}" in
+            1) cmd_list ;;
+            2) submenu_download ;;
+            3) cmd_config ;;
+            4) cmd_add "" ;;
+            5) submenu_remove ;;
+            6) cmd_status ;;
+            7) cmd_restart ;;
+            8) cmd_uninstall; exit 0 ;;
+            9|q|Q) exit 0 ;;
+            *) msg_warn "无效选项: ${choice}" ;;
+        esac
+    done
+}
+
+# ---------- Main dispatch ----------
+case "${1:-menu}" in
+    menu|"")              show_menu ;;
+    add)                  shift; cmd_add "$@" ;;
+    remove|rm)            shift; cmd_remove "$@" ;;
+    list|ls)              cmd_list ;;
+    qr|show)              shift; cmd_qr "$@" ;;
+    config|cfg)           cmd_config ;;
+    status|st)            cmd_status ;;
+    restart)              cmd_restart ;;
+    uninstall)            shift; cmd_uninstall "$@" ;;
+    -h|--help|help)
+        cat <<EOF
+wgmgr — manage a wireguard-vps-installer install
+
+Usage:
+  sudo wgmgr                         Interactive menu
+  sudo wgmgr add <name>              Add a client
+  sudo wgmgr remove <name> [--yes]   Remove a client (y/N confirm unless --yes)
+  sudo wgmgr list                    List clients
+  sudo wgmgr qr <name>               Re-render QR for a client
+  sudo wgmgr config                  Show server config
+  sudo wgmgr status                  Show service status
+  sudo wgmgr restart                 Restart wg-quick@wg0
+  sudo wgmgr uninstall [--yes]       Run uninstall.sh (y/N confirm unless --yes)
+
+Global flags (apply to any subcommand):
+  --yes, -y                           Skip y/N confirmations on destructive ops
+
+Interaction style:
+  All prompts are "type a number, press Enter" — no arrow keys needed.
+  Destructive ops (remove, uninstall) print what will be removed and ask y/N.
+EOF
+        ;;
+    *)
+        echo "Unknown subcommand: $1 (try --help)" >&2
+        exit 1
+        ;;
+esac

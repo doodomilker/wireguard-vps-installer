@@ -1,0 +1,29 @@
+# Editors / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Generated secrets / keys / runtime artifacts (NEVER commit)
+*.key
+*.pub
+*.conf.bak
+clients/*.conf
+clients/*.png
+output/
+tmp/
+*.log
+
+# Local dev/test
+.env
+.envrc
+
+# Hermes workspace internal — not for upstream
+PROGRESS.md
+AGENTS.md
+当前工作.md
+项目清单.md
+命名规范.md
+怎么开始新项目.md
