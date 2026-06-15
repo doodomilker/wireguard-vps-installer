@@ -13,19 +13,42 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo ".")"
 
-# Source libs if available, else error out clearly
+# Source libs: try local checkout first, fallback to GitHub raw (curl|bash mode)
 if [[ -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/lib/common.sh"
     source "${SCRIPT_DIR}/lib/network.sh"
     source "${SCRIPT_DIR}/lib/server.sh"
     source "${SCRIPT_DIR}/lib/client.sh"
+    WGMGR_SOURCE="${SCRIPT_DIR}/wgmgr"
+    WGMGR_LIB_SOURCE="${SCRIPT_DIR}/lib"
+elif [[ -f "/tmp/wg-install-lib/common.sh" ]]; then
+    # Already downloaded in this session
+    source "/tmp/wg-install-lib/common.sh"
+    source "/tmp/wg-install-lib/network.sh"
+    source "/tmp/wg-install-lib/server.sh"
+    source "/tmp/wg-install-lib/client.sh"
+    WGMGR_LIB_SOURCE="/tmp/wg-install-lib"
 else
-    # curl | bash path: libs are NOT available locally. Embed minimal stubs.
-    # This branch is reserved for future enhancement; for v1 we require a checkout.
-    echo "[✗] lib/ not found next to install.sh." >&2
-    echo "    Either clone the repo and run ./install.sh, or wait for v2 (inline libs)." >&2
-    exit 1
+    # curl | bash mode: download libs from GitHub raw
+    echo "[i] Downloading library files from GitHub..."
+    TMP_LIB="/tmp/wg-install-lib"
+    rm -rf "${TMP_LIB}"
+    mkdir -p "${TMP_LIB}"
+    GH_RAW="https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/lib"
+    for f in common.sh network.sh server.sh client.sh; do
+        if ! curl -fsSL "${GH_RAW}/${f}" -o "${TMP_LIB}/${f}" 2>/dev/null; then
+            echo "[✗] Failed to download lib/${f} from GitHub. Check your internet connection." >&2
+            echo "    Alternative: git clone https://github.com/doodomilker/wireguard-vps-installer.git && cd wireguard-vps-installer && sudo ./install.sh" >&2
+            exit 1
+        fi
+    done
+    source "${TMP_LIB}/common.sh"
+    source "${TMP_LIB}/network.sh"
+    source "${TMP_LIB}/server.sh"
+    source "${TMP_LIB}/client.sh"
+    WGMGR_SOURCE="${TMP_LIB}/.."
+    WGMGR_LIB_SOURCE="${TMP_LIB}"
 fi
 
 # ---------- Defaults ----------
@@ -164,14 +187,30 @@ msg_step "Generating default client 'client1'"
 
 run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
 
-# ---------- Install wgmgr globally ----------
+# ---------- Install wgmgr command ----------
 msg_step "Installing wgmgr command"
 
-if [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
+if [[ "${WGMGR_SOURCE}" != "${SCRIPT_DIR}/wgmgr" ]]; then
+    # curl | bash mode: download wgmgr and install libs permanently
+    WGMGR_TARGET="/usr/local/bin/wgmgr"
+    run rm -f /tmp/wgmgr-download
+    run curl -fsSL "https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/wgmgr" -o /tmp/wgmgr-download
+    run install -m 0755 /tmp/wgmgr-download "${WGMGR_TARGET}"
+    run rm -f /tmp/wgmgr-download
+    # Install libs for wgmgr runtime lookup
+    run mkdir -p /usr/local/share/wgmgr/lib
+    run cp "${WGMGR_LIB_SOURCE}"/*.sh /usr/local/share/wgmgr/lib/
+    run chmod 644 /usr/local/share/wgmgr/lib/*.sh
+    msg_ok "Installed ${WGMGR_TARGET} (curl|bash mode)"
+elif [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
     run install -m 0755 "${SCRIPT_DIR}/wgmgr" /usr/local/bin/wgmgr
+    # Also install libs for wgmgr runtime (in case user runs from curl|bash later)
+    run mkdir -p /usr/local/share/wgmgr/lib
+    run cp "${SCRIPT_DIR}/lib"/*.sh /usr/local/share/wgmgr/lib/
+    run chmod 644 /usr/local/share/wgmgr/lib/*.sh
     msg_ok "Installed /usr/local/bin/wgmgr"
 else
-    msg_warn "wgmgr script not found at ${SCRIPT_DIR}/wgmgr — skipping global install"
+    msg_warn "wgmgr not found — skipping global install"
 fi
 
 # ---------- Print summary ----------
