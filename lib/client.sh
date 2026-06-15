@@ -131,11 +131,10 @@ render_qr_png() {
         msg_warn "qrencode not installed — skipping PNG QR"
         return 1
     fi
-    # Use level M error correction and explicit 0 (auto) version for better
-    # compatibility with mobile WireGuard clients (default L + 0 sometimes
-    # produces codes that Android/iOS clients refuse to scan).
-    qrencode -t png -l M --level=M -o "${out_png}" < "${conf_path}" || \
-    qrencode -t png -o "${out_png}" < "${conf_path}"
+    # Use level M error correction for better compatibility with mobile
+    # WireGuard clients (default L sometimes produces codes that Android/iOS
+    # apps refuse to scan, especially for configs containing PSK + DNS).
+    qrencode -t png -l M -o "${out_png}" < "${conf_path}"
     chmod 600 "${out_png}"
     msg_ok "Wrote PNG QR: ${out_png}"
 }

@@ -31,13 +31,12 @@ EOF
 
 cat > "${MOCK_DIR}/qrencode" <<'EOF'
 #!/usr/bin/env bash
-# Mock qrencode: supports both
+# Mock qrencode: supports the real call signature
 #   qrencode -t png -l M -o OUT < IN
-#   qrencode -t png -o OUT < IN
 #   qrencode -t ansiutf8 < IN
 mode="${1:-}"
 outflag="${2:-}"
-# Find -o OUT anywhere in args (skip the input redirect)
+# Find -o OUT anywhere in args
 out=""
 prev=""
 for arg in "$@"; do
