@@ -311,27 +311,21 @@ fi
 echo ""
 echo "[wgmgr menu structure]"
 menu_text="$(cat "${ROOT_DIR}/wgmgr")"
-assert_contains "menu has option 1) 查看当前账户"  "1) 查看当前账户"   "${menu_text}"
-assert_contains "menu has option 2) 获取下载链接"  "2) 获取下载链接"   "${menu_text}"
-assert_contains "menu has option 3) 查看各项配置"  "3) 查看各项配置"   "${menu_text}"
-assert_contains "menu has option 4) 添加新账户"    "4) 添加新账户"     "${menu_text}"
-assert_contains "menu has option 5) 删除账户"      "5) 删除账户"       "${menu_text}"
-assert_contains "menu has option 6) 查看服务状态"  "6) 查看服务状态"   "${menu_text}"
-assert_contains "menu has option 7) 重启服务"      "7) 重启服务"       "${menu_text}"
-assert_contains "menu has option 8) 卸载 wireguard" "8) 卸载 wireguard" "${menu_text}"
-assert_contains "menu has option 9) 退出"          "9) 退出"           "${menu_text}"
-# No more "按 Enter 返回菜单" anywhere
-if [[ "${menu_text}" != *"按 Enter 返回菜单"* ]]; then
-    printf "  \033[32m✓\033[0m removed all '按 Enter 返回菜单' prompts\n"
-    PASS=$((PASS + 1))
-else
-    printf "  \033[31m✗\033[0m still has '按 Enter 返回菜单' prompts\n"
-    FAIL=$((FAIL + 1))
-fi
-# Has y/N confirm for remove
-assert_contains "remove has y/N confirm"  'confirm_destructive "Confirm remove' "${menu_text}"
-# Has --yes flag
-assert_contains "supports --yes flag"  '--yes|-y' "${menu_text}"
+assert_contains "menu has option 1. 查看所有账户"  "1. 查看所有账户"   "${menu_text}"
+assert_contains "menu has option 2. 添加新账户"     "2. 添加新账户"     "${menu_text}"
+assert_contains "menu has option 3. 删除账户"       "3. 删除账户"       "${menu_text}"
+assert_contains "menu has option 4. 查看账户配置"   "4. 查看账户配置"   "${menu_text}"
+assert_contains "menu has option 5. 查看服务状态"   "5. 查看服务状态"   "${menu_text}"
+assert_contains "menu has option 6. 重启服务"       "6. 重启服务"       "${menu_text}"
+assert_contains "menu has option 7. 查看服务器配置" "7. 查看服务器配置" "${menu_text}"
+assert_contains "menu has option 8. 卸载 WireGuard" "8. 卸载 WireGuard" "${menu_text}"
+assert_contains "menu has option 9. 退出"          "9. 退出"           "${menu_text}"
+assert_contains "menu sections have 账户管理"      "账户管理"          "${menu_text}"
+assert_contains "menu sections have 服务管理"      "服务管理"          "${menu_text}"
+# remove has y/N confirm (Chinese version)
+assert_contains "remove has y/N confirm"  "确认删除"  "${menu_text}"
+# supports --yes flag
+assert_contains "supports --yes flag"  "--yes" "${menu_text}"
 
 echo ""
 TOTAL=$((PASS + FAIL))

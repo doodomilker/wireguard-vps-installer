@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# wgmgr — global command-line / menu for managing wireguard-vps-installer installs
-# Installed by install.sh to /usr/local/bin/wgmgr
-#
-# All interactive input is "type number, press Enter" — no arrow keys, no Tab.
-# Destructive ops (remove / uninstall) require an extra y/N confirmation by default.
-# Pass --yes (or -y) to skip the y/N prompt (intended for scripts / cron).
+# wgmgr — WireGuard 管理器（v2ray-agent 风格菜单）
+# 装到 /usr/local/bin/wgmgr
 
 set -euo pipefail
 
@@ -22,8 +18,7 @@ for candidate in \
 done
 
 if [[ -z "${_LIB_DIR}" ]]; then
-    echo "[✗] wgmgr: lib/ not found. Please reinstall via install.sh." >&2
-    echo "    Searched: /usr/local/share/wgmgr/lib, /etc/wireguard/.wgmgr/lib, script-relative lib/" >&2
+    echo "[✗] wgmgr: lib/ not found." >&2
     exit 1
 fi
 
@@ -37,7 +32,20 @@ WG_DIR="/etc/wireguard"
 WG_CONF="${WG_DIR}/wg0.conf"
 WG_CLIENTS_DIR="${WG_DIR}/clients"
 
-# ---------- Global flag parsing (--yes / -y to skip y/N) ----------
+# ---------- Color echo (v2ray-agent style) ----------
+C_RED_LINE='\033[31m'
+C_SKY_BLUE='\033[1;36m'
+C_GREEN='\033[32m'
+C_YELLOW='\033[33m'
+C_WHITE='\033[37m'
+C_RESET='\033[0m'
+
+echo_red()    { echo -e "${C_RED_LINE}$*${C_RESET}"; }
+echo_sky()    { echo -e "${C_SKY_BLUE}$*${C_RESET}"; }
+echo_green()  { echo -e "${C_GREEN}$*${C_RESET}"; }
+echo_yellow() { echo -e "${C_YELLOW}$*${C_RESET}"; }
+
+# ---------- Global flag parsing ----------
 ASSUME_YES=0
 WG_ARGS=()
 for arg in "$@"; do
@@ -46,29 +54,27 @@ for arg in "$@"; do
         *)        WG_ARGS+=("${arg}") ;;
     esac
 done
-# Re-export args back to $@
 set -- "${WG_ARGS[@]+"${WG_ARGS[@]}"}"
 
 # ---------- Helpers ----------
 require_installed() {
     if [[ ! -f "${WG_CONF}" ]]; then
-        msg_err "WireGuard not installed at ${WG_CONF}. Run install.sh first."
+        echo_red "WireGuard 未安装，请先运行 install.sh"
         exit 1
     fi
 }
 
 read_server_state() {
     if [[ ! -f "${WG_CONF}" ]]; then
-        msg_err "No server config at ${WG_CONF}"
+        echo_red "配置文件 ${WG_CONF} 不存在"
         exit 1
     fi
-    # Try to read public key from conf first, else fallback to wg show
     SERVER_PUBLIC="$(grep -E '^#?PublicKey' "${WG_CONF}" 2>/dev/null | awk '{print $3}' | head -1 || true)"
     if [[ -z "${SERVER_PUBLIC}" ]] && has_cmd wg; then
         SERVER_PUBLIC="$(wg show wg0 public-key 2>/dev/null || true)"
     fi
     if [[ -z "${SERVER_PUBLIC}" ]]; then
-        msg_err "Could not parse server public key from ${WG_CONF} or wg show"
+        echo_red "无法获取服务器公钥"
         exit 1
     fi
     SERVER_PORT="$(grep -E '^ListenPort' "${WG_CONF}" | awk '{print $3}' || true)"
@@ -80,7 +86,7 @@ read_server_state() {
     if [[ -n "${PUBLIC_IP}" ]]; then
         SERVER_ENDPOINT="${PUBLIC_IP}:${SERVER_PORT}"
     else
-        SERVER_ENDPOINT="<your-vps-ip>:${SERVER_PORT}"
+        SERVER_ENDPOINT="<vps-ip>:${SERVER_PORT}"
     fi
     if [[ "${SERVER_ADDRESS}" =~ ^([0-9.]+)/ ]]; then
         ip="${BASH_REMATCH[1]}"
@@ -89,51 +95,48 @@ read_server_state() {
         SERVER_SUBNET="10.0.0.0/24"
     fi
     if [[ -d "${WG_CLIENTS_DIR}" ]]; then
-        SERVER_DNS="$(grep -hE '^DNS' "${WG_CLIENTS_DIR}"/*.conf 2>/dev/null | head -1 | awk '{print $3}' || echo "1.1.1.1, 8.8.8.8")"
+        SERVER_DNS="$(grep -hE '^DNS' "${WG_CLIENTS_DIR}"/*.conf 2>/dev/null | head -1 | awk '{for(i=3;i<=NF;i++) printf "%s%s", (i>3?OFS:""), $i} END{print ""}' || true)"
+        SERVER_DNS="${SERVER_DNS%,}"
         [[ -z "${SERVER_DNS}" ]] && SERVER_DNS="1.1.1.1, 8.8.8.8"
     else
         SERVER_DNS="1.1.1.1, 8.8.8.8"
     fi
 }
 
-# Print a number-prompt, read a line, return the input.
-# Usage: prompt "Label: " [default]
-prompt() {
+confirm_destructive() {
     local label="$1"
-    local default="${2:-}"
+    if [[ "${ASSUME_YES}" == "1" ]]; then return 0; fi
+    if [[ ! -t 0 ]]; then return 1; fi
     local reply
-    if [[ -n "${default}" ]]; then
-        read -r -p "${label} [${default}]: " reply
-        reply="${reply:-${default}}"
-    else
-        read -r -p "${label}: " reply
-    fi
+    echo -n -e "${C_YELLOW}${label} [y/N]: ${C_RESET}"
+    read -r reply
+    case "${reply}" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+prompt_input() {
+    local label="$1"
+    local reply
+    echo -n -e "${C_YELLOW}${label}: ${C_RESET}"
+    read -r reply
     printf '%s' "${reply}"
 }
 
-# Confirm y/N prompt. Honors --yes / -y. Non-interactive stdin defaults to N.
-confirm_destructive() {
-    local label="$1"
-    if [[ "${ASSUME_YES}" == "1" ]]; then
-        return 0
-    fi
-    if [[ ! -t 0 ]]; then
-        # No TTY (piped input) — assume N for safety
-        return 1
-    fi
-    local reply
-    read -r -p "${label} [y/N]: " reply
-    case "${reply}" in
-        [yY]|[yY][eE][sS]) return 0 ;;
-        *) return 1 ;;
-    esac
+# ---------- Separator ----------
+separator() {
+    echo_red "=============================================================="
 }
 
 # ---------- Subcommands ----------
 cmd_list() {
     require_installed
-    msg_banner "Current clients"
+    read_server_state
+    separator
+    echo_sky "当前账户列表"
+    separator
     list_clients
+    echo ""
+    echo_green "服务器公钥: ${SERVER_PUBLIC}"
+    echo_green "Endpoint:   ${SERVER_ENDPOINT}"
 }
 
 cmd_add() {
@@ -141,13 +144,15 @@ cmd_add() {
     read_server_state
     local name="${1:-}"
     if [[ -z "${name}" ]]; then
-        name="$(prompt 'Client name (e.g. iphone, mac, router)')"
+        name="$(prompt_input '请输入账户名 (如: iphone, mac, router)')"
     fi
     if [[ -z "${name}" ]]; then
-        msg_err "Client name required."
+        echo_red "账户名不能为空"
         exit 1
     fi
-    deliver_client "${name}" "${SERVER_PUBLIC}" "${SERVER_ENDPOINT}" "${SERVER_SUBNET}" "${SERVER_DNS}" 1
+    if ! deliver_client "${name}" "${SERVER_PUBLIC}" "${SERVER_ENDPOINT}" "${SERVER_SUBNET}" "${SERVER_DNS}" 1; then
+        return
+    fi
     if [[ "${DRYRUN}" != "1" ]]; then
         local conf="${WG_CLIENTS_DIR}/${name}.conf"
         local client_pub client_ip psk
@@ -156,49 +161,52 @@ cmd_add() {
         psk="$(grep -E '^PresharedKey' "${conf}" | awk '{print $3}' || true)"
 
         add_peer_to_server "${name}" "${client_pub}" "${client_ip}" "${psk}"
-
         if has_cmd wg; then
-            local args=(set wg0 peer "${client_pub}" allowed-ips "${client_ip}/32")
-            if [[ -n "${psk}" ]]; then
-                args+=(preshared-key <(printf '%s' "${psk}"))
-            fi
-            wg "${args[@]}" 2>/dev/null || systemctl reload wg-quick@wg0 2>/dev/null || true
+            wg set wg0 peer "${client_pub}" allowed-ips "${client_ip}/32" 2>/dev/null || \
+                systemctl reload wg-quick@wg0 2>/dev/null || true
         else
             systemctl reload wg-quick@wg0 2>/dev/null || true
         fi
-        msg_ok "Peer '${name}' active on running interface"
     fi
+    echo ""
+    echo_green "账户 '${name}' 添加成功！"
+    cmd_qr "${name}"
+}
+
+cmd_add_interactive() {
+    cmd_add ""
+    read -r -p "按 Enter 返回菜单..."
 }
 
 cmd_remove() {
     require_installed
     local name="${1:-}"
     if [[ -z "${name}" ]]; then
-        name="$(prompt 'Client name to remove')"
+        list_clients
+        echo ""
+        name="$(prompt_input '请输入要删除的账户名')"
     fi
     if [[ -z "${name}" ]]; then
-        msg_err "Client name required."
-        exit 1
+        echo_red "账户名不能为空"
+        return
     fi
     local conf="${WG_CLIENTS_DIR}/${name}.conf"
     if [[ ! -f "${conf}" ]]; then
-        msg_err "Client '${name}' does not exist (no conf at ${conf})"
-        return 1
+        echo_red "账户 '${name}' 不存在"
+        return
     fi
-    # Show what we're about to remove
     local client_ip
     client_ip="$(grep -E '^Address' "${conf}" | awk '{print $3}' | head -1)"
     echo ""
-    msg_warn "About to remove:"
-    echo "  Name: ${name}"
-    echo "  IP:   ${client_ip}"
-    echo "  conf: ${conf}"
-    echo "  png:  ${WG_CLIENTS_DIR}/${name}.png"
-    if ! confirm_destructive "Confirm remove '${name}'?"; then
-        msg_info "Aborted."
-        return 0
+    echo_yellow "即将删除以下账户:"
+    echo_red  "  名称: ${name}"
+    echo_red  "  IP:   ${client_ip}"
+    echo_red  "  文件: ${conf}"
+    if ! confirm_destructive "确认删除 '${name}'?"; then
+        echo_sky "已取消"
+        return
     fi
-    # Live remove from wg0 first
+    # Live remove from wg0
     if has_cmd wg; then
         local client_pub
         client_pub="$(grep -E '^PublicKey' "${conf}" | awk '{print $3}' | head -1)"
@@ -207,58 +215,92 @@ cmd_remove() {
         fi
     fi
     remove_client "${name}"
+    echo_green "账户 '${name}' 已删除"
 }
 
 cmd_qr() {
     require_installed
     local name="${1:-}"
     if [[ -z "${name}" ]]; then
-        name="$(prompt 'Client name')"
+        list_clients
+        echo ""
+        name="$(prompt_input '请输入账户名')"
     fi
     local conf="${WG_CLIENTS_DIR}/${name}.conf"
     if [[ ! -f "${conf}" ]]; then
-        msg_err "Client '${name}' not found."
-        exit 1
+        echo_red "账户 '${name}' 不存在"
+        return
     fi
-    echo "── conf ──────────────────────────────────────────"
+    separator
+    echo_sky "'${name}' 配置信息"
+    separator
+    echo ""
+    echo_green "────────── 客户端配置 ──────────"
     cat "${conf}"
-    echo "──────────────────────────────────────────────────"
-    render_qr_terminal "${conf}"
+    echo_green "────────────────────────────────────"
+    echo ""
+    echo_yellow "二维码（手机扫）:"
+    render_qr_terminal "${conf}" || true
+    echo ""
+    echo_green "下载命令:"
+    echo "  scp root@${PUBLIC_IP:-<vps-ip>}:${conf} ./"
 }
 
 cmd_config() {
     require_installed
     read_server_state
-    print_server_summary "${SERVER_PUBLIC}" "${SERVER_PORT}" "${SERVER_SUBNET}" "${SERVER_DNS}" "${SERVER_ENDPOINT}"
+    separator
+    echo_sky "服务器配置"
+    separator
+    echo_yellow "  公钥 (PublicKey):    ${C_WHITE}${SERVER_PUBLIC}"
+    echo_yellow "  Endpoint:            ${C_WHITE}${SERVER_ENDPOINT}"
+    echo_yellow "  监听端口 (Port):     ${C_WHITE}${SERVER_PORT}"
+    echo_yellow "  子网 (Subnet):       ${C_WHITE}${SERVER_SUBNET}"
+    echo_yellow "  DNS:                 ${C_WHITE}${SERVER_DNS}"
+    echo_yellow "  配置路径:            ${C_WHITE}${WG_CONF}"
+    echo_yellow "  客户端目录:          ${C_WHITE}${WG_CLIENTS_DIR}"
+    echo ""
+    echo_green "  当前账户:"
+    list_clients
 }
 
 cmd_status() {
     require_installed
-    msg_banner "WireGuard Service Status"
+    separator
+    echo_sky "服务状态"
+    separator
     if has_cmd wg; then
         wg show
     fi
     echo ""
     if has_cmd systemctl; then
-        systemctl status wg-quick@wg0.service --no-pager || true
+        systemctl status wg-quick@wg0.service --no-pager 2>/dev/null || true
     fi
 }
 
 cmd_restart() {
     require_installed
     if has_cmd systemctl; then
-        systemctl restart wg-quick@wg0.service
-        msg_ok "Restarted wg-quick@wg0"
+        systemctl restart wg-quick@wg0.service 2>/dev/null || true
+        echo_green "服务已重启"
     else
-        msg_err "systemctl not available"
-        exit 1
+        echo_red "systemctl 不可用"
     fi
 }
 
 cmd_uninstall() {
-    if ! confirm_destructive "This will STOP the VPN and REMOVE all keys, clients, iptables rules. Continue?"; then
-        msg_info "Aborted."
-        return 0
+    separator
+    echo_red "即将卸载 WireGuard"
+    separator
+    echo_yellow "  此操作将:"
+    echo_yellow "  · 停止并删除 wg-quick@wg0 服务"
+    echo_yellow "  · 删除所有密钥和配置文件"
+    echo_yellow "  · 删除 iptables 规则"
+    echo_yellow "  · 删除 /usr/local/bin/wgmgr"
+    echo ""
+    if ! confirm_destructive "确认卸载?"; then
+        echo_sky "已取消"
+        return
     fi
     local candidates=(
         "/usr/local/share/wgmgr/uninstall.sh"
@@ -267,117 +309,59 @@ cmd_uninstall() {
     )
     for c in "${candidates[@]}"; do
         if [[ -f "${c}" ]]; then
-            msg_info "Running ${c}"
-            exec bash "${c}" "$@"
+            exec bash "${c}"
         fi
     done
-    msg_err "Could not find uninstall.sh. Run it manually from the repo."
-    exit 1
 }
 
-# ---------- Numbered sub-menus ----------
-# 2) 获取下载链接 — re-implemented as a numeric sub-menu
-submenu_download() {
-    require_installed
-    read_server_state
-    local cname
-
-    echo ""
-    echo "  请选择下载方式:"
-    echo "  1) 终端 ASCII 二维码"
-    echo "  2) PNG 图片路径"
-    echo "  3) base64 文本"
-    echo "  0) 返回上级"
-    echo ""
-    local fmt
-    fmt="$(prompt '请输入选项 [0-3]')"
-    case "${fmt}" in
-        0|"") return 0 ;;
-        1|2|3) ;;
-        *) msg_warn "无效选项"; return 1 ;;
-    esac
-
-    cname="$(prompt 'Client name' 'client1')"
-    local conf="${WG_CLIENTS_DIR}/${cname}.conf"
-    if [[ ! -f "${conf}" ]]; then
-        msg_err "Client '${cname}' not found"
-        return 1
-    fi
-    case "${fmt}" in
-        1)
-            echo "── conf ──────────────────────────────────────────"
-            cat "${conf}"
-            echo "──────────────────────────────────────────────────"
-            render_qr_terminal "${conf}"
-            ;;
-        2)
-            local png="${WG_CLIENTS_DIR}/${cname}.png"
-            if [[ -f "${png}" ]]; then
-                echo ""
-                echo "  PNG 路径: ${png}"
-                echo "  下载命令: scp root@${PUBLIC_IP:-<vps-ip>}:${png} ./"
-            else
-                msg_warn "PNG 不存在. 用: wgmgr qr ${cname} 重生成"
-            fi
-            ;;
-        3)
-            echo "── base64 ─────────────────────────────────────"
-            base64 "${conf}"
-            echo "────────────────────────────────────────────────"
-            echo "  客户端解码: base64 -d > ${cname}.conf"
-            ;;
-    esac
-}
-
-# 5) 删除账户 — number-prompt for client name + final y/N
-submenu_remove() {
-    require_installed
-    echo ""
-    msg_banner "Select client to remove"
-    list_clients
-    echo ""
-    cmd_remove ""   # asks for name + y/N inside
-}
-
-# ---------- Top-level menu ----------
+# ---------- Main Menu ----------
 show_menu() {
     require_installed
     read_server_state
 
-    local choice
     while true; do
-        msg_banner "wgmgr — WireGuard Manager"
-        echo "  Endpoint: ${SERVER_ENDPOINT}  Subnet: ${SERVER_SUBNET}  Port: ${SERVER_PORT}"
+        separator
+        echo_sky "       WGMGR — WireGuard 管理器"
+        separator
+        echo_yellow "  Server: ${C_WHITE}${SERVER_ENDPOINT}"
+        echo_yellow "  子网:   ${C_WHITE}${SERVER_SUBNET}"
         echo ""
-        cat <<'EOF'
-  1) 查看当前账户
-  2) 获取下载链接
-  3) 查看各项配置
-  4) 添加新账户
-  5) 删除账户
-  6) 查看服务状态
-  7) 重启服务
-  8) 卸载 wireguard
-  9) 退出
-EOF
+        echo_sky "━━━━━━━━━━ 账户管理 ━━━━━━━━━━━"
+        echo_yellow "  1. 查看所有账户"
+        echo_yellow "  2. 添加新账户"
+        echo_yellow "  3. 删除账户"
+        echo_yellow "  4. 查看账户配置（含二维码）"
         echo ""
-        choice="$(prompt '请输入选项 [1-9]')"
+        echo_sky "━━━━━━━━━━ 服务管理 ━━━━━━━━━━━"
+        echo_yellow "  5. 查看服务状态"
+        echo_yellow "  6. 重启服务"
+        echo ""
+        echo_sky "━━━━━━━━━━ 系统 ━━━━━━━━━━━"
+        echo_yellow "  7. 查看服务器配置"
+        echo_yellow "  8. 卸载 WireGuard"
+        echo_yellow "  9. 退出"
+        separator
+        echo -n -e "${C_YELLOW}请选择 [1-9]: ${C_RESET}"
+
+        local choice
+        read -r choice || break
+
         case "${choice}" in
-            1) cmd_list ;;
-            2) submenu_download ;;
-            3) cmd_config ;;
-            4) cmd_add "" ;;
-            5) submenu_remove ;;
-            6) cmd_status ;;
-            7) cmd_restart ;;
-            8) cmd_uninstall; exit 0 ;;
+            1) cmd_list; read -r -p "按 Enter 返回菜单..." _ ;;
+            2) cmd_add_interactive ;;
+            3) cmd_remove ""; read -r -p "按 Enter 返回菜单..." _ ;;
+            4) cmd_qr ""; read -r -p "按 Enter 返回菜单..." _ ;;
+            5) cmd_status; read -r -p "按 Enter 返回菜单..." _ ;;
+            6) cmd_restart; read -r -p "按 Enter 返回菜单..." _ ;;
+            7) cmd_config; read -r -p "按 Enter 返回菜单..." _ ;;
+            8) cmd_uninstall; read -r -p "按 Enter 返回菜单..." _ ;;
             9|q|Q) exit 0 ;;
-            *) msg_warn "无效选项: ${choice}" ;;
+            *) echo_red "无效选项: ${choice}"; read -r -p "按 Enter 继续..." _ ;;
         esac
     done
 }
 
-# ---------- Main dispatch ----------
+# ---------- Main Dispatch ----------
 case "${1:-menu}" in
     menu|"")              show_menu ;;
     add)                  shift; cmd_add "$@" ;;
@@ -390,29 +374,25 @@ case "${1:-menu}" in
     uninstall)            shift; cmd_uninstall "$@" ;;
     -h|--help|help)
         cat <<EOF
-wgmgr — manage a wireguard-vps-installer install
+wgmgr — WireGuard 管理器
 
-Usage:
-  sudo wgmgr                         Interactive menu
-  sudo wgmgr add <name>              Add a client
-  sudo wgmgr remove <name> [--yes]   Remove a client (y/N confirm unless --yes)
-  sudo wgmgr list                    List clients
-  sudo wgmgr qr <name>               Re-render QR for a client
-  sudo wgmgr config                  Show server config
-  sudo wgmgr status                  Show service status
-  sudo wgmgr restart                 Restart wg-quick@wg0
-  sudo wgmgr uninstall [--yes]       Run uninstall.sh (y/N confirm unless --yes)
+用法:
+  sudo wgmgr                    交互菜单（v2ray-agent 风格）
+  sudo wgmgr add <name>         添加账户
+  sudo wgmgr remove <name>      删除账户
+  sudo wgmgr list               列出所有账户
+  sudo wgmgr qr <name>          查看账户配置 + 二维码
+  sudo wgmgr config             查看服务器配置
+  sudo wgmgr status             查看服务状态
+  sudo wgmgr restart            重启服务
+  sudo wgmgr uninstall          卸载
 
-Global flags (apply to any subcommand):
-  --yes, -y                           Skip y/N confirmations on destructive ops
-
-Interaction style:
-  All prompts are "type a number, press Enter" — no arrow keys needed.
-  Destructive ops (remove, uninstall) print what will be removed and ask y/N.
+选项:
+  --yes, -y   跳过确认（脚本模式）
 EOF
         ;;
     *)
-        echo "Unknown subcommand: $1 (try --help)" >&2
+        echo_red "未知子命令: $1"
         exit 1
         ;;
 esac
