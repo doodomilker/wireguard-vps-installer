@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # wireguard-vps-installer — one-shot install (standalone, self-contained)
 # Usage: curl -fsSL .../install.sh | sudo bash
-set -euo pipefail
+# Note: not using 'set -u' because we have many optional CLI flags
+set -eo pipefail
 
 # ===== Inline library functions =====
 # These are the lib/*.sh contents, embedded for curl | bash compatibility.
@@ -869,6 +870,7 @@ SERVER_ENDPOINT_OVERRIDE="${SERVER_ENDPOINT_OVERRIDE:-}"
 USE_PSK="${USE_PSK:-1}"
 EXPOSE_DOWNLOAD="${EXPOSE_DOWNLOAD:-0}"
 DRYRUN="${DRYRUN:-0}"
+WGMGR_LIB_SOURCE="${WGMGR_LIB_SOURCE:-}"
 
 require_root
 detect_os
