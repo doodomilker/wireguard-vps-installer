@@ -969,9 +969,16 @@ if [[ "${WGMGR_SOURCE}" != "${SCRIPT_DIR}/wgmgr" ]]; then
     run curl -fsSL "https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/wgmgr" -o /tmp/wgmgr-download
     run install -m 0755 /tmp/wgmgr-download "${WGMGR_TARGET}"
     run rm -f /tmp/wgmgr-download
-    # Install libs for wgmgr runtime lookup
+    # Install libs for wgmgr runtime lookup (download if not present)
     run mkdir -p /usr/local/share/wgmgr/lib
-    run cp "${WGMGR_LIB_SOURCE}"/*.sh /usr/local/share/wgmgr/lib/
+    if [[ -z "${WGMGR_LIB_SOURCE}" || ! -d "${WGMGR_LIB_SOURCE}" ]]; then
+        # curl | bash with no local lib: download each lib
+        for libf in common.sh network.sh server.sh client.sh; do
+            run curl -fsSL "https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/lib/${libf}" -o "/usr/local/share/wgmgr/lib/${libf}"
+        done
+    else
+        run cp "${WGMGR_LIB_SOURCE}"/*.sh /usr/local/share/wgmgr/lib/
+    fi
     run chmod 644 /usr/local/share/wgmgr/lib/*.sh
     msg_ok "Installed ${WGMGR_TARGET} (curl|bash mode)"
 elif [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
