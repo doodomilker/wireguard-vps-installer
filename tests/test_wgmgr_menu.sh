@@ -318,8 +318,9 @@ assert_contains "menu has option 4. 查看账户配置"   "4. 查看账户配置
 assert_contains "menu has option 5. 查看服务状态"   "5. 查看服务状态"   "${menu_text}"
 assert_contains "menu has option 6. 重启服务"       "6. 重启服务"       "${menu_text}"
 assert_contains "menu has option 7. 查看服务器配置" "7. 查看服务器配置" "${menu_text}"
-assert_contains "menu has option 8. 卸载 WireGuard" "8. 卸载 WireGuard" "${menu_text}"
-assert_contains "menu has option 9. 退出"          "9. 退出"           "${menu_text}"
+assert_contains "menu has option 8. 重装 WireGuard"   "8. 重装 WireGuard"   "${menu_text}"
+assert_contains "menu has option 9. 卸载 WireGuard"   "9. 卸载 WireGuard"   "${menu_text}"
+assert_contains "menu has option 0. 退出"              "0. 退出"            "${menu_text}"
 assert_contains "menu sections have 账户管理"      "账户管理"          "${menu_text}"
 assert_contains "menu sections have 服务管理"      "服务管理"          "${menu_text}"
 # remove has y/N confirm (Chinese version)

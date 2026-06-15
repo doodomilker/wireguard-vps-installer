@@ -322,38 +322,74 @@ cmd_uninstall() {
         return
     fi
     # Built-in uninstall (don't rely on external uninstall.sh)
-    echo_yellow "[1/5] 停止 wg-quick@wg0 服务..."
+    do_full_uninstall "no"
+}
+
+# Performs complete cleanup of WireGuard from the system.
+# Argument: "yes" = also purge apt/dnf packages; "no" = skip packages.
+do_full_uninstall() {
+    local purge_pkgs="${1:-no}"
+    echo_yellow "[1/7] 停止并禁用 wg-quick@wg0 服务..."
     if has_cmd systemctl; then
-        systemctl disable --now wg-quick@wg0.service 2>/dev/null || true
+        systemctl stop wg-quick@wg0.service 2>/dev/null || true
+        systemctl disable wg-quick@wg0.service 2>/dev/null || true
     fi
-    echo_yellow "[2/5] 删除 iptables NAT 规则..."
+    echo_yellow "[2/7] 卸载任何剩余 wg-quick 残留接口..."
+    if has_cmd ip; then
+        for iface in $(ip link show 2>/dev/null | awk -F: '/wg[0-9]+/ {gsub(/ /, "", $2); print $2}'); do
+            ip link delete "${iface}" 2>/dev/null || true
+        done
+    fi
+    echo_yellow "[3/7] 清理 iptables NAT / FORWARD 规则..."
     local egress_iface
     egress_iface="$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')"
     if [[ -z "${egress_iface}" ]]; then egress_iface="eth0"; fi
     if has_cmd iptables; then
-        iptables -t nat -D POSTROUTING -s "10.0.0.0/24" -o "${egress_iface}" -j MASQUERADE 2>/dev/null || true
-        iptables -D FORWARD -s "10.0.0.0/24" -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -d "10.0.0.0/24" -j ACCEPT 2>/dev/null || true
+        # All known wg subnets + the default 10.0.0.0/24
+        for subnet in "10.0.0.0/24" "10.10.0.0/24" "192.168.100.0/24"; do
+            iptables -t nat -D POSTROUTING -s "${subnet}" -o "${egress_iface}" -j MASQUERADE 2>/dev/null || true
+            iptables -D FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || true
+            iptables -D FORWARD -d "${subnet}" -j ACCEPT 2>/dev/null || true
+        done
+        # Also flush any wg-related chain leftovers (the PostUp rule)
+        iptables -D FORWARD -i wg+ -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -o wg+ -j ACCEPT 2>/dev/null || true
         if has_cmd netfilter-persistent; then
             netfilter-persistent save 2>/dev/null || true
         elif has_cmd service; then
             service iptables save 2>/dev/null || true
         fi
     fi
-    echo_yellow "[3/5] 删除 /etc/wireguard/ 整树..."
+    echo_yellow "[4/7] 删除 /etc/wireguard/ 整树（含所有 client conf / png）..."
     rm -rf /etc/wireguard
-    echo_yellow "[4/5] 删除 IP forwarding 配置..."
+    echo_yellow "[5/7] 删除 IP forwarding 配置..."
     rm -f /etc/sysctl.d/99-wireguard.conf
-    echo_yellow "[5/5] 删除 /usr/local/bin/wgmgr 和 lib..."
+    # Restore default IP forwarding (kernel still has it, but reset sysctl file)
+    if has_cmd sysctl; then
+        sysctl -w net.ipv4.ip_forward=0 >/dev/null 2>&1 || true
+    fi
+    echo_yellow "[6/7] 删除 wgmgr 二进制和 lib..."
     rm -f /usr/local/bin/wgmgr
     rm -rf /usr/local/share/wgmgr
+    # Also clear any leftover helper scripts in /tmp
+    rm -f /tmp/wg-install-lib/* /tmp/wgmgr-download 2>/dev/null || true
+    rm -rf /tmp/wg-install-lib 2>/dev/null || true
+    echo_yellow "[7/7] 验证清理..."
+    if [[ -d /etc/wireguard ]]; then
+        echo_red "  ⚠ /etc/wireguard 还在（强制删除）"
+        rm -rf /etc/wireguard
+    fi
+    if [[ -f /usr/local/bin/wgmgr ]]; then
+        echo_red "  ⚠ wgmgr 还在（强制删除）"
+        rm -f /usr/local/bin/wgmgr
+    fi
     echo ""
     separator
-    echo_green "✓ 卸载完成"
+    echo_green "✓ WireGuard 全部清除完成"
     separator
-    echo_yellow "可选: 卸载软件包 (wireguard-tools / qrencode)"
-    echo ""
-    if confirm_destructive "是否同时卸载软件包? [y/N]"; then
+
+    if [[ "${purge_pkgs}" == "yes" ]]; then
+        echo_yellow "卸载软件包 (wireguard-tools / qrencode)..."
         if has_cmd apt-get; then
             DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove wireguard wireguard-tools qrencode iptables-persistent 2>/dev/null || true
         elif has_cmd dnf; then
@@ -361,8 +397,67 @@ cmd_uninstall() {
         fi
         echo_green "✓ 软件包已卸载"
     fi
+
     echo ""
-    echo_sky "如需重新安装: curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh | sudo bash"
+    echo_sky "系统状态:"
+    if has_cmd wg; then
+        echo "  wg 命令还在（来自 wireguard-tools），可保留"
+    fi
+    if has_cmd systemctl; then
+        if systemctl list-unit-files wg-quick@.service 2>/dev/null | grep -q wg-quick; then
+            echo "  wg-quick@.service 单元还在（来自 wireguard 包），可保留"
+        fi
+    fi
+    echo ""
+    echo_sky "重新安装: curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh | sudo bash"
+    echo_sky "           或: sudo wgmgr reinstall   （一键清完再装）"
+}
+
+cmd_reinstall() {
+    separator
+    echo_red "即将重装 WireGuard（清空当前所有配置）"
+    separator
+    echo_yellow "  此操作将:"
+    echo_yellow "  · 完全清除当前 WireGuard（7 步硬清）"
+    echo_yellow "  · 自动重新运行 install.sh（恢复全新安装）"
+    echo ""
+    echo_yellow "  你将获得:"
+    echo_yellow "  · 新的 server keypair（之前的会作废）"
+    echo_yellow "  · 新的 client1（IP 仍是 10.0.0.2）"
+    echo_yellow "  · 新 client1.conf + PNG QR + 终端 ASCII QR"
+    echo ""
+    echo_yellow "  提示: 已有 client 的设备需要重新导入新 conf！"
+    echo ""
+    if ! confirm_destructive "确认重装?"; then
+        echo_sky "已取消"
+        return
+    fi
+
+    # 7-step cleanup
+    do_full_uninstall "yes"
+
+    # Re-run install.sh automatically
+    echo ""
+    separator
+    echo_sky "重装：开始 install.sh"
+    separator
+    local installer=""
+    for c in \
+        "/usr/local/share/wgmgr/install.sh" \
+        "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/install.sh" \
+        "./install.sh"; do
+        if [[ -f "$c" ]]; then
+            installer="$c"
+            break
+        fi
+    done
+
+    if [[ -n "$installer" ]]; then
+        bash "$installer" 2>&1 | tail -40
+    else
+        echo_yellow "本地 install.sh 不存在，从 GitHub 拉..."
+        bash <(curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh)
+    fi
 }
 
 # ---------- Main Menu ----------
@@ -389,10 +484,11 @@ show_menu() {
         echo ""
         echo_sky "━━━━━━━━━━ 系统 ━━━━━━━━━━━"
         echo_yellow "  7. 查看服务器配置"
-        echo_yellow "  8. 卸载 WireGuard"
-        echo_yellow "  9. 退出"
+        echo_yellow "  8. 重装 WireGuard (清空再装)"
+        echo_yellow "  9. 卸载 WireGuard (只清除)"
+        echo_yellow "  0. 退出"
         separator
-        printf '\033[33m请选择 [1-9]: \033[0m'
+        printf '\033[33m请选择 [0-9]: \033[0m'
 
         local choice
         read -r choice || break
@@ -405,8 +501,9 @@ show_menu() {
             5) cmd_status; read -r -p "按 Enter 返回菜单..." _ ;;
             6) cmd_restart; read -r -p "按 Enter 返回菜单..." _ ;;
             7) cmd_config; read -r -p "按 Enter 返回菜单..." _ ;;
-            8) cmd_uninstall; read -r -p "按 Enter 返回菜单..." _ ;;
-            9|q|Q) exit 0 ;;
+            8) cmd_reinstall; read -r -p "按 Enter 返回菜单..." _ ;;
+            9) cmd_uninstall; read -r -p "按 Enter 返回菜单..." _ ;;
+            0|q|Q) exit 0 ;;
             *) echo_red "无效选项: ${choice}"; read -r -p "按 Enter 继续..." _ ;;
         esac
     done
@@ -422,7 +519,8 @@ case "${1:-menu}" in
     config|cfg)           cmd_config ;;
     status|st)            cmd_status ;;
     restart)              cmd_restart ;;
-    uninstall)            shift; cmd_uninstall "$@" ;;
+    reinstall)             shift; cmd_reinstall "$@" ;;
+    uninstall)             shift; cmd_uninstall "$@" ;;
     -h|--help|help)
         cat <<EOF
 wgmgr — WireGuard 管理器
@@ -436,7 +534,8 @@ wgmgr — WireGuard 管理器
   sudo wgmgr config             查看服务器配置
   sudo wgmgr status             查看服务状态
   sudo wgmgr restart            重启服务
-  sudo wgmgr uninstall          卸载
+  sudo wgmgr reinstall          重装 (清空所有配置再装一遍)
+  sudo wgmgr uninstall          卸载 (只清除)
 
 选项:
   --yes, -y   跳过确认（脚本模式）
