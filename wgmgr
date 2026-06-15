@@ -321,16 +321,48 @@ cmd_uninstall() {
         echo_sky "已取消"
         return
     fi
-    local candidates=(
-        "/usr/local/share/wgmgr/uninstall.sh"
-        "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/uninstall.sh"
-        "./uninstall.sh"
-    )
-    for c in "${candidates[@]}"; do
-        if [[ -f "${c}" ]]; then
-            exec bash "${c}"
+    # Built-in uninstall (don't rely on external uninstall.sh)
+    echo_yellow "[1/5] 停止 wg-quick@wg0 服务..."
+    if has_cmd systemctl; then
+        systemctl disable --now wg-quick@wg0.service 2>/dev/null || true
+    fi
+    echo_yellow "[2/5] 删除 iptables NAT 规则..."
+    local egress_iface
+    egress_iface="$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')"
+    if [[ -z "${egress_iface}" ]]; then egress_iface="eth0"; fi
+    if has_cmd iptables; then
+        iptables -t nat -D POSTROUTING -s "10.0.0.0/24" -o "${egress_iface}" -j MASQUERADE 2>/dev/null || true
+        iptables -D FORWARD -s "10.0.0.0/24" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -d "10.0.0.0/24" -j ACCEPT 2>/dev/null || true
+        if has_cmd netfilter-persistent; then
+            netfilter-persistent save 2>/dev/null || true
+        elif has_cmd service; then
+            service iptables save 2>/dev/null || true
         fi
-    done
+    fi
+    echo_yellow "[3/5] 删除 /etc/wireguard/ 整树..."
+    rm -rf /etc/wireguard
+    echo_yellow "[4/5] 删除 IP forwarding 配置..."
+    rm -f /etc/sysctl.d/99-wireguard.conf
+    echo_yellow "[5/5] 删除 /usr/local/bin/wgmgr 和 lib..."
+    rm -f /usr/local/bin/wgmgr
+    rm -rf /usr/local/share/wgmgr
+    echo ""
+    separator
+    echo_green "✓ 卸载完成"
+    separator
+    echo_yellow "可选: 卸载软件包 (wireguard-tools / qrencode)"
+    echo ""
+    if confirm_destructive "是否同时卸载软件包? [y/N]"; then
+        if has_cmd apt-get; then
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove wireguard wireguard-tools qrencode iptables-persistent 2>/dev/null || true
+        elif has_cmd dnf; then
+            dnf remove -y wireguard-tools qrencode iptables-services 2>/dev/null || true
+        fi
+        echo_green "✓ 软件包已卸载"
+    fi
+    echo ""
+    echo_sky "如需重新安装: curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh | sudo bash"
 }
 
 # ---------- Main Menu ----------
