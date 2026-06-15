@@ -312,13 +312,16 @@ cmd_uninstall() {
     echo_red "即将卸载 WireGuard"
     separator
     echo_yellow "  此操作将:"
-    echo_yellow "  · 停止并删除 wg-quick@wg0 服务"
+    echo_yellow "  · 停止并禁用 wg-quick@wg0 服务"
     echo_yellow "  · 删除所有密钥和配置文件"
     echo_yellow "  · 删除 iptables 规则"
     echo_yellow "  · 删除 /usr/local/bin/wgmgr"
     echo ""
-    if ! confirm_destructive "确认卸载?"; then
-        echo_sky "已取消"
+    echo_yellow "  (保留软件包: wireguard / wireguard-tools / qrencode)"
+    echo_yellow "  (保留包方便 'sudo wgmgr reinstall' 重装不用重下)"
+    echo ""
+    if ! confirm_destructive "是否确认卸载安装内容？[y/N]"; then
+        echo_sky "放弃卸载"
         return
     fi
     # Built-in uninstall (don't rely on external uninstall.sh)
@@ -411,6 +414,26 @@ do_full_uninstall() {
     echo ""
     echo_sky "重新安装: curl -fsSL https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/install.sh | sudo bash"
     echo_sky "           或: sudo wgmgr reinstall   （一键清完再装）"
+    echo_sky "完全删除软件包: sudo wgmgr purge      （含 wireguard / qrencode 等）"
+}
+
+cmd_purge() {
+    separator
+    echo_red "即将完全删除 WireGuard (含软件包)"
+    separator
+    echo_yellow "  此操作将:"
+    echo_yellow "  · 7 步硬清所有配置（与 uninstall 相同）"
+    echo_yellow "  · 卸载软件包:"
+    echo_yellow "      Debian/Ubuntu:  wireguard wireguard-tools qrencode iptables-persistent"
+    echo_yellow "      CentOS/RHEL:    wireguard-tools qrencode iptables-services"
+    echo ""
+    echo_yellow "  提示: 装回来要重新下大包, 慢一点. 不需要可以选 9 (卸载不卸包)"
+    echo ""
+    if ! confirm_destructive "是否确认完全删除 WireGuard？[y/N]"; then
+        echo_sky "放弃卸载"
+        return
+    fi
+    do_full_uninstall "yes"
 }
 
 cmd_reinstall() {
@@ -521,6 +544,7 @@ case "${1:-menu}" in
     restart)              cmd_restart ;;
     reinstall)             shift; cmd_reinstall "$@" ;;
     uninstall)             shift; cmd_uninstall "$@" ;;
+    purge|rm-pkgs)         shift; cmd_purge "$@" ;;
     -h|--help|help)
         cat <<EOF
 wgmgr — WireGuard 管理器
@@ -535,7 +559,8 @@ wgmgr — WireGuard 管理器
   sudo wgmgr status             查看服务状态
   sudo wgmgr restart            重启服务
   sudo wgmgr reinstall          重装 (清空所有配置再装一遍)
-  sudo wgmgr uninstall          卸载 (只清除)
+  sudo wgmgr uninstall          卸载 (只清除, 保留软件包)
+  sudo wgmgr purge              完全删除 (含 wireguard / qrencode 等软件包)
 
 选项:
   --yes, -y   跳过确认（脚本模式）
