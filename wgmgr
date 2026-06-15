@@ -91,10 +91,9 @@ read_server_state() {
     if [[ -d "${WG_CLIENTS_DIR}" ]]; then
         SERVER_DNS="$(grep -hE '^DNS' "${WG_CLIENTS_DIR}"/*.conf 2>/dev/null | head -1 | awk '{for(i=3;i<=NF;i++) printf "%s%s", (i>3?OFS:""), $i} END{print ""}' || true)"
         SERVER_DNS="${SERVER_DNS%,}"
-        [[ -z "${SERVER_DNS}" ]] && SERVER_DNS="1.1.1.1, 8.8.8.8"
-    else
-        SERVER_DNS="1.1.1.1, 8.8.8.8"
     fi
+    SERVER_DNS="${SERVER_DNS:-1.1.1.1, 8.8.8.8}"
+    return 0
 }
 
 confirm_destructive() {
