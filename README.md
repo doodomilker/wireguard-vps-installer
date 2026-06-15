@@ -28,8 +28,6 @@ cd wireguard-vps-installer
 sudo ./install.sh
 ```
 
-> Local dev path: `~/.hermes/workspace/projects/wireguard-vps-installer/`
-
 ## After install
 
 ```bash

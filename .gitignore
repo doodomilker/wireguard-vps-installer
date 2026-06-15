@@ -20,10 +20,6 @@ tmp/
 .env
 .envrc
 
-# Hermes workspace internal — not for upstream
+# Hermes workspace internal (not for upstream)
 PROGRESS.md
 AGENTS.md
-当前工作.md
-项目清单.md
-命名规范.md
-怎么开始新项目.md
