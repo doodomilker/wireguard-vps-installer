@@ -728,6 +728,7 @@ render_qr_png() {
         msg_warn "qrencode not installed — skipping PNG QR"
         return 1
     fi
+    qrencode -t png -l M -o "${out_png}" < "${conf_path}" || \
     qrencode -t png -o "${out_png}" < "${conf_path}"
     chmod 600 "${out_png}"
     msg_ok "Wrote PNG QR: ${out_png}"
