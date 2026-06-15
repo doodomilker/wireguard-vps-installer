@@ -33,13 +33,39 @@ WG_CONF="${WG_DIR}/wg0.conf"
 WG_CLIENTS_DIR="${WG_DIR}/clients"
 
 # ---------- Color echo (v2ray-agent style) ----------
-C_WHITE='\033[37m'
+C_WHITE=$'\033[37m'
 echo_red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 echo_sky()    { printf '\033[1;36m%s\033[0m\n' "$*"; }
 echo_green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 echo_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-# ---------- Global flag parsing ----------
+# ---------- Helpers ----------
+# Resolve client name: supports "1" (first client) or full name
+resolve_client_name() {
+    local input="$1"
+    if [[ -z "${input}" ]]; then
+        echo ""
+        return
+    fi
+    # Check if it's a name that exists
+    if [[ -f "${WG_CLIENTS_DIR}/${input}.conf" ]]; then
+        echo "${input}"
+        return
+    fi
+    # Check if it's a number (1-based index of sorted clients)
+    if [[ "${input}" =~ ^[0-9]+$ ]]; then
+        local idx=0
+        while IFS= read -r -d '' f; do
+            ((idx++)) || true
+            if [[ "${idx}" -eq "${input}" ]]; then
+                basename "${f}" .conf
+                return
+            fi
+        done < <(find "${WG_CLIENTS_DIR}" -maxdepth 1 -name "*.conf" -type f -print0 2>/dev/null | sort -z)
+    fi
+    # Not found
+    echo "${input}"
+}
 ASSUME_YES=0
 WG_ARGS=()
 for arg in "$@"; do
@@ -177,7 +203,7 @@ cmd_remove() {
     if [[ -z "${name}" ]]; then
         list_clients
         echo ""
-        name="$(prompt_input '请输入要删除的账户名')"
+        name="$(resolve_client_name "$(prompt_input '请输入序号或账户名')")"
     fi
     if [[ -z "${name}" ]]; then
         echo_red "账户名不能为空"
@@ -217,7 +243,7 @@ cmd_qr() {
     if [[ -z "${name}" ]]; then
         list_clients
         echo ""
-        name="$(prompt_input '请输入账户名')"
+        name="$(resolve_client_name "$(prompt_input '请输入序号或账户名')")"
     fi
     local conf="${WG_CLIENTS_DIR}/${name}.conf"
     if [[ ! -f "${conf}" ]]; then
