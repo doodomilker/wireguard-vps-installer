@@ -189,7 +189,41 @@ shim_remove() {
 case "${1:-}" in
     list)         shim_list ;;
     remove|rm)    shift; shim_remove "$@" ;;
-    *)            echo "usage: $0 {list|remove <name>}" >&2; exit 2 ;;
+    add)          shift
+                 # Simulate cmd_add: write conf, append to wg0.conf, syncconf
+                 new_name="${1:-test_add_$$}"
+                 new_priv="$(openssl rand -base64 32)"
+                 new_pub="$(echo "$new_priv" | wg pubkey)"
+                 new_ip="10.0.99.42"
+                 psk="mock-psk-$(date +%N)"
+                 cat > "${WG_CLIENTS_DIR}/${new_name}.conf" <<EOF
+[Interface]
+PrivateKey = ${new_priv}
+Address = ${new_ip}/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = mock-server-pub
+PresharedKey = ${psk}
+Endpoint = 155.94.180.115:443
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+                 # Append to wg0.conf (idempotent check)
+                 if ! grep -q "^# client: ${new_name}\$" "${WG_CONF}"; then
+                     cat >> "${WG_CONF}" <<EOF
+
+# client: ${new_name}
+[Peer]
+PublicKey = ${new_pub}
+PresharedKey = ${psk}
+AllowedIPs = ${new_ip}/32
+EOF
+                 fi
+                 echo "added ${new_name} ip=${new_ip}"
+                 echo "${new_name}" > /tmp/wgmgr_test_last_added
+                 ;;
+    *)            echo "usage: $0 {list|remove <name>|add <name>}" >&2; exit 2 ;;
 esac
 OUTER_EOF
 # Now substitute the placeholders
@@ -327,6 +361,11 @@ assert_contains "menu sections have 服务管理"      "服务管理"          "
 assert_contains "remove has y/N confirm"  "确认删除"  "${menu_text}"
 # supports --yes flag
 assert_contains "supports --yes flag"  "--yes" "${menu_text}"
+# Bug fix: cmd_add must use wg syncconf (not wg set) and append to wg0.conf
+assert_contains "cmd_add uses wg syncconf" "wg syncconf wg0 -" "${menu_text}"
+assert_contains "cmd_add writes to wg0.conf" 'WG_CONF}' "${menu_text}"
+# Idempotent guard: should check if client block already exists
+assert_contains "cmd_add idempotent guard" "grep -q" "${menu_text}"
 
 echo ""
 TOTAL=$((PASS + FAIL))

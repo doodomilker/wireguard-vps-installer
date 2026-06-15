@@ -31,15 +31,26 @@ EOF
 
 cat > "${MOCK_DIR}/qrencode" <<'EOF'
 #!/usr/bin/env bash
+# Mock qrencode: supports both
+#   qrencode -t png -l M -o OUT < IN
+#   qrencode -t png -o OUT < IN
+#   qrencode -t ansiutf8 < IN
 mode="${1:-}"
-if [[ "${mode}" == "-t" ]]; then
-    outflag="${2:-}"
-    out="${4:-}"
-    if [[ "${outflag}" == "png" && -n "${out}" ]]; then
-        # Write valid PNG header so we can verify file creation
-        printf '\x89PNG\r\n\x1a\n%s' "wgmgr-mock-qr" > "${out}"
-    elif [[ "${outflag}" == "ansiutf8" ]]; then
-        cat <<'QR'
+outflag="${2:-}"
+# Find -o OUT anywhere in args (skip the input redirect)
+out=""
+prev=""
+for arg in "$@"; do
+    if [[ "${prev}" == "-o" ]]; then
+        out="${arg}"
+        break
+    fi
+    prev="${arg}"
+done
+if [[ "${mode}" == "-t" && "${outflag}" == "png" && -n "${out}" ]]; then
+    printf '\x89PNG\r\n\x1a\n%sgenerated_by_test' > "${out}"
+elif [[ "${mode}" == "-t" && "${outflag}" == "ansiutf8" ]]; then
+    cat <<'QR'
 [QR CODE ASCII ART - mock]
 █▀▀▀▀▀█ ▀▀█ █▀▀▀▀▀█
 █ ███ █ █▀▀ █ ███ █
@@ -49,7 +60,6 @@ if [[ "${mode}" == "-t" ]]; then
 ▀ █ ▀ █▀▀ █▀ █ ▀ █
 ▀▀▀▀▀▀▀ ▀ ▀ ▀ ▀ ▀
 QR
-    fi
 else
     echo "(mock) qrencode $*"
 fi

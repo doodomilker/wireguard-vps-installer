@@ -180,11 +180,28 @@ cmd_add() {
         psk="$(grep -E '^PresharedKey' "${conf}" | awk '{print $3}' || true)"
 
         add_peer_to_server "${name}" "${client_pub}" "${client_ip}" "${psk}"
+
+        # Apply to running wg0 immediately. Use wg syncconf (safer than wg set
+        # which doesn't always persist + can be confused by PSK via stdin).
         if has_cmd wg; then
-            wg set wg0 peer "${client_pub}" allowed-ips "${client_ip}/32" 2>/dev/null || \
-                systemctl reload wg-quick@wg0 2>/dev/null || true
-        else
-            systemctl reload wg-quick@wg0 2>/dev/null || true
+            # Apply to running wg0 immediately. Use wg syncconf (safer than
+            # wg set which doesn't always persist + is fiddly with PSK over stdin).
+            wg set wg0 peer "${client_pub}" remove 2>/dev/null || true
+
+            # Append to wg0.conf (idempotent: skip if already present)
+            if ! grep -q "^# client: ${name}\$" "${WG_CONF}"; then
+                cat >> "${WG_CONF}" <<EOF
+
+# client: ${name}
+[Peer]
+PublicKey = ${client_pub}
+PresharedKey = ${psk}
+AllowedIPs = ${client_ip}/32
+EOF
+            fi
+
+            # Re-parse and apply without dropping the interface
+            wg-quick strip wg0 2>/dev/null | wg syncconf wg0 - 2>/dev/null || true
         fi
     fi
     echo ""
