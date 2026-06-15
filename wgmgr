@@ -109,7 +109,7 @@ confirm_destructive() {
 prompt_input() {
     local label="$1"
     local reply
-    printf '\033[33m%s: \033[0m' "${label}"
+    printf '\033[33m%s: \033[0m' "${label}" >&2
     read -r reply
     printf '%s' "${reply}"
 }
