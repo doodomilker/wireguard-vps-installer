@@ -87,7 +87,7 @@ detect_os() {
 }
 
 # ----- EOL check -----
-check_os_supported() {
+check_os_ok() {
     case "${OS_ID}" in
         debian)
             # 11+ supported
@@ -861,9 +861,18 @@ else
 fi
 
 # ===== Main install logic =====
+# ---------- Defaults ----------
+WG_PORT="${WG_PORT:-51820}"
+WG_SUBNET="${WG_SUBNET:-10.0.0.0/24}"
+WG_DNS="${WG_DNS:-1.1.1.1, 8.8.8.8}"
+SERVER_ENDPOINT_OVERRIDE="${SERVER_ENDPOINT_OVERRIDE:-}"
+USE_PSK="${USE_PSK:-1}"
+EXPOSE_DOWNLOAD="${EXPOSE_DOWNLOAD:-0}"
+DRYRUN="${DRYRUN:-0}"
+
 require_root
 detect_os
-check_os_supported
+check_os_ok
 msg_ok "OS: ${OS_PRETTY}  (pkg: ${PKG_MANAGER})"
 
 # ---------- Idempotency: if already installed, prompt ----------
