@@ -965,6 +965,12 @@ msg_step "Generating default client 'client1'"
 run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
 run add_peer_to_server "client1" "${CLIENT_PUBLIC}" "${CLIENT_IP}" "${CLIENT_PSK}"
 
+# Reload wg-quick so the new peer is loaded into the kernel (fix for install-time peer not appearing)
+if has_cmd systemctl && systemctl is-active --quiet wg-quick@wg0.service 2>/dev/null; then
+    run systemctl restart wg-quick@wg0.service
+    msg_ok "Reloaded wg-quick@wg0 with new peer"
+fi
+
 # ---------- Install wgmgr command ----------
 msg_step "Installing wgmgr command"
 
