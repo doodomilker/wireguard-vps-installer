@@ -963,6 +963,7 @@ fi
 msg_step "Generating default client 'client1'"
 
 run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
+run add_peer_to_server "client1" "${CLIENT_PUBLIC}" "${CLIENT_IP}" "${CLIENT_PSK}"
 
 # ---------- Install wgmgr command ----------
 msg_step "Installing wgmgr command"
