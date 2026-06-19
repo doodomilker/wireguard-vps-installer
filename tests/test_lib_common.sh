@@ -173,6 +173,65 @@ assert_contains "dryrun output contains marker" "[dryrun]" "${output}"
 assert_contains "dryrun output contains command" "echo"  "${output}"
 assert_contains "dryrun output contains arg"     "hello-from-dryrun" "${output}"
 
+# ---- apply_nat_rules idempotency ----
+echo ""
+echo "[apply_nat_rules idempotency]"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/lib/network.sh"
+
+DRYRUN=0
+export DRYRUN
+PKG_MANAGER=apt
+FORWARD_SRC_PRESENT=0
+FORWARD_DST_PRESENT=1
+FORWARD_SRC_ADDS=0
+FORWARD_DST_ADDS=0
+NAT_PRESENT=1
+
+iptables() {
+    if [[ "$1" == "-t" && "$2" == "nat" && "$3" == "-C" ]]; then
+        (( NAT_PRESENT )) && return 0 || return 1
+    fi
+    if [[ "$1" == "-t" && "$2" == "nat" && "$3" == "-A" ]]; then
+        NAT_PRESENT=1
+        return 0
+    fi
+    if [[ "$1" == "-C" && "$2" == "FORWARD" && "$3" == "-s" ]]; then
+        (( FORWARD_SRC_PRESENT )) && return 0 || return 1
+    fi
+    if [[ "$1" == "-C" && "$2" == "FORWARD" && "$3" == "-d" ]]; then
+        (( FORWARD_DST_PRESENT )) && return 0 || return 1
+    fi
+    if [[ "$1" == "-A" && "$2" == "FORWARD" && "$3" == "-s" ]]; then
+        FORWARD_SRC_PRESENT=1
+        FORWARD_SRC_ADDS=$((FORWARD_SRC_ADDS + 1))
+        return 0
+    fi
+    if [[ "$1" == "-A" && "$2" == "FORWARD" && "$3" == "-d" ]]; then
+        FORWARD_DST_PRESENT=1
+        FORWARD_DST_ADDS=$((FORWARD_DST_ADDS + 1))
+        return 0
+    fi
+    return 0
+}
+
+persist_iptables_rules() { return 0; }
+has_cmd() { [[ "$1" == "iptables" || "$1" == "ip" ]] && return 0; command -v "$1" >/dev/null 2>&1; }
+ip() {
+    if [[ "$1" == "link" && "$2" == "show" ]]; then
+        return 0
+    fi
+    if [[ "$1" == "route" ]]; then
+        echo "default via 1.1.1.1 dev eth0"
+        return 0
+    fi
+    return 0
+}
+
+apply_nat_rules "10.0.0.0/24" "eth0" >/dev/null
+assert_eq "missing FORWARD src rule is added once" "1" "${FORWARD_SRC_ADDS}"
+assert_eq "existing FORWARD dst rule is not duplicated" "0" "${FORWARD_DST_ADDS}"
+
 # ---- Summary ----
 echo ""
 TOTAL=$((PASS + FAIL))

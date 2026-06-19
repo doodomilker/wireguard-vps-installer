@@ -123,10 +123,19 @@ apply_nat_rules() {
     fi
 
     # Add FORWARD accept for wg subnet (defensive)
+    local added_forward=0
     if ! iptables -C FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null; then
         iptables -A FORWARD -s "${subnet}" -j ACCEPT
+        added_forward=1
+    fi
+    if ! iptables -C FORWARD -d "${subnet}" -j ACCEPT 2>/dev/null; then
         iptables -A FORWARD -d "${subnet}" -j ACCEPT
-        msg_ok "Added iptables FORWARD accept for ${subnet}"
+        added_forward=1
+    fi
+    if (( added_forward )); then
+        msg_ok "Added missing iptables FORWARD accept rule(s) for ${subnet}"
+    else
+        msg_info "iptables FORWARD accept rules already exist"
     fi
 
     # Persist rules
