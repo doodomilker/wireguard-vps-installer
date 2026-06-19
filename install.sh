@@ -176,7 +176,7 @@ confirm() {
         # Non-interactive stdin — assume no
         return 1
     fi
-    read -r -p "$(printf '%s' "${prompt} [y/N]: ' ")" reply
+    read -r -p "$(printf '%s' "${prompt} [y/N]: ")" reply
     case "${reply:-${default}}" in
         [yY]|[yY][eE][sS]) return 0 ;;
         *) return 1 ;;
@@ -456,15 +456,22 @@ EOF
 # ----- Convert CIDR to Nth host address -----
 # Args: subnet_cidr index
 # Example: subnet_to_host 10.0.0.0/24 1  ->  10.0.0.1
+# Returns 1 (and prints to stderr) if idx would exceed the subnet's host range.
+# For /24: max valid idx = 254 (host .1-.254; .0 is network, .255 is broadcast).
 subnet_to_host() {
     local cidr="$1"
     local idx="$2"
     local ip="${cidr%/*}"
     local prefix="${cidr#*/}"
     IFS='.' read -r o1 o2 o3 o4 <<<"${ip}"
-    # Only handle /24 cleanly — that's our default; for other subnets use python or bc
+
     if [[ "${prefix}" == "24" ]]; then
-        printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "$((o4 + idx))"
+        local host_octet=$((o4 + idx))
+        if (( host_octet > 254 || host_octet < 1 )); then
+            msg_err "subnet_to_host: idx=${idx} would yield ${ip%.*}.${host_octet}, out of /24 host range (1-254)"
+            return 1
+        fi
+        printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "${host_octet}"
     else
         # Fallback: ipcalc-style (if available), else print original
         if has_cmd python3; then
@@ -479,7 +486,12 @@ else:
 "
         else
             # Crude: assume /24, strip suffix and add idx
-            printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "$((o4 + idx))"
+            local host_octet=$((o4 + idx))
+            if (( host_octet > 254 || host_octet < 1 )); then
+                msg_err "subnet_to_host: idx=${idx} would yield ${ip%.*}.${host_octet}, out of /24 host range (1-254)"
+                return 1
+            fi
+            printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "${host_octet}"
         fi
     fi
 }
@@ -680,16 +692,11 @@ DNS = ${dns}
 
 [Peer]
 PublicKey = ${server_public}
+$(if [[ -n "${psk}" ]]; then printf 'PresharedKey = %s\n' "${psk}"; fi)
 Endpoint = ${server_endpoint}
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
-
-    if [[ -n "${psk}" ]]; then
-        # Insert PSK line after PublicKey
-        sed -i.bak "/^PublicKey = ${server_public}$/a\\
-PresharedKey = ${psk}" "${conf_path}" && rm -f "${conf_path}.bak"
-    fi
 
     chmod 600 "${conf_path}"
     CLIENT_IP="${client_ip}"
@@ -917,6 +924,26 @@ if [[ -n "${SERVER_ENDPOINT_OVERRIDE}" ]]; then
     PUBLIC_IP="${SERVER_ENDPOINT_OVERRIDE%:*}"
     WG_PORT="${SERVER_ENDPOINT_OVERRIDE##*:}"
     msg_info "Using override endpoint: ${PUBLIC_IP}:${WG_PORT}"
+
+    # Validate format — catch "ip:port" mistakes like ":51820" (empty IP)
+    # or "1.2.3.4" (no port → WG_PORT becomes the whole string).
+    # We don't enforce IPv4 specifically (IPv6 with [..]:port also valid) — just
+    # check that both sides are non-empty and the port is numeric + in range.
+    if [[ -z "${PUBLIC_IP}" || -z "${WG_PORT}" ]]; then
+        msg_err "Invalid --endpoint: '${SERVER_ENDPOINT_OVERRIDE}' (expected IP:PORT, got empty IP or port)"
+        exit 1
+    fi
+    if ! [[ "${WG_PORT}" =~ ^[0-9]+$ ]] || (( WG_PORT < 1 || WG_PORT > 65535 )); then
+        msg_err "Invalid --endpoint port: '${WG_PORT}' (must be numeric 1-65535)"
+        exit 1
+    fi
+    # Reject the "no colon" case explicitly: "1.2.3.4" → WG_PORT="1.2.3.4" passes
+    # the numeric regex only if someone wrote WG_PORT=${SERVER_ENDPOINT_OVERRIDE##*:}
+    # which returns the whole string. The numeric check above catches this.
+    if [[ "${SERVER_ENDPOINT_OVERRIDE}" != *:* ]]; then
+        msg_err "Invalid --endpoint: '${SERVER_ENDPOINT_OVERRIDE}' (missing :PORT suffix)"
+        exit 1
+    fi
 else
     if ! detect_public_ip; then
         msg_err "Cannot detect public IPv4 and no --endpoint given."
@@ -951,6 +978,16 @@ run write_server_conf "${SERVER_PRIVATE}" "${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}
 run enable_ip_forward
 run apply_nat_rules "${WG_SUBNET}" "eth0"
 
+# ---------- Generate first client + register as peer on server ----------
+# IMPORTANT: generate + add_peer_to_server MUST happen BEFORE enable_and_start_wg,
+# so the kernel wg table gets client1's PublicKey/AllowedIPs on first bringup.
+# Otherwise the server listens on 51820 but has no peer registered, and client1
+# handshakes will be silently dropped.
+msg_step "Generating default client 'client1'"
+
+run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
+run add_peer_to_server "client1" "${CLIENT_PUBLIC}" "${CLIENT_IP}" "${CLIENT_PSK}"
+
 # ---------- Enable + start wg-quick ----------
 if ! run enable_and_start_wg; then
     if [[ "${DRYRUN}" != "1" ]]; then
@@ -959,22 +996,17 @@ if ! run enable_and_start_wg; then
     fi
 fi
 
-# ---------- Generate first client ----------
-msg_step "Generating default client 'client1'"
-
-run deliver_client "client1" "${SERVER_PUBLIC}" "${PUBLIC_IP}:${WG_PORT}" "${WG_SUBNET}" "${WG_DNS}" "${USE_PSK}"
-run add_peer_to_server "client1" "${CLIENT_PUBLIC}" "${CLIENT_IP}" "${CLIENT_PSK}"
-
-# Reload wg-quick so the new peer is loaded into the kernel (fix for install-time peer not appearing)
-if has_cmd systemctl && systemctl is-active --quiet wg-quick@wg0.service 2>/dev/null; then
-    run systemctl restart wg-quick@wg0.service
-    msg_ok "Reloaded wg-quick@wg0 with new peer"
-fi
-
 # ---------- Install wgmgr command ----------
 msg_step "Installing wgmgr command"
 
-if [[ "${WGMGR_SOURCE}" != "${SCRIPT_DIR}/wgmgr" ]]; then
+# Mode detection:
+#   WGMGR_SOURCE empty            → curl|bash mode (download wgmgr + libs from GitHub)
+#   WGMGR_SOURCE = ${SCRIPT_DIR}  → git clone mode (install wgmgr + libs from local checkout)
+# The original logic compared "${WGMGR_SOURCE}" != "${SCRIPT_DIR}/wgmgr" — but
+# WGMGR_SOURCE never included the "/wgmgr" suffix, so the comparison was ALWAYS
+# true and the local-install elif branch was unreachable. Fix: gate on
+# emptiness, not string mismatch.
+if [[ -z "${WGMGR_SOURCE}" ]]; then
     # curl | bash mode: download wgmgr and install libs permanently
     WGMGR_TARGET="/usr/local/bin/wgmgr"
     run rm -f /tmp/wgmgr-download
@@ -993,7 +1025,8 @@ if [[ "${WGMGR_SOURCE}" != "${SCRIPT_DIR}/wgmgr" ]]; then
     fi
     run chmod 644 /usr/local/share/wgmgr/lib/*.sh
     msg_ok "Installed ${WGMGR_TARGET} (curl|bash mode)"
-elif [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
+elif [[ -n "${WGMGR_SOURCE}" && -f "${SCRIPT_DIR}/wgmgr" ]]; then
+    # git clone mode: install wgmgr + libs from local checkout (no network)
     run install -m 0755 "${SCRIPT_DIR}/wgmgr" /usr/local/bin/wgmgr
     # Also install libs for wgmgr runtime (in case user runs from curl|bash later)
     run mkdir -p /usr/local/share/wgmgr/lib

@@ -83,16 +83,11 @@ DNS = ${dns}
 
 [Peer]
 PublicKey = ${server_public}
+$(if [[ -n "${psk}" ]]; then printf 'PresharedKey = %s\n' "${psk}"; fi)
 Endpoint = ${server_endpoint}
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
-
-    if [[ -n "${psk}" ]]; then
-        # Insert PSK line after PublicKey
-        sed -i.bak "/^PublicKey = ${server_public}$/a\\
-PresharedKey = ${psk}" "${conf_path}" && rm -f "${conf_path}.bak"
-    fi
 
     chmod 600 "${conf_path}"
     CLIENT_IP="${client_ip}"

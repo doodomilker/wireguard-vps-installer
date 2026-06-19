@@ -164,7 +164,7 @@ confirm() {
         # Non-interactive stdin — assume no
         return 1
     fi
-    read -r -p "$(printf '%s' "${prompt} [y/N]: ' ")" reply
+    read -r -p "$(printf '%s' "${prompt} [y/N]: ")" reply
     case "${reply:-${default}}" in
         [yY]|[yY][eE][sS]) return 0 ;;
         *) return 1 ;;

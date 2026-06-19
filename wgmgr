@@ -181,13 +181,12 @@ cmd_add() {
 
         add_peer_to_server "${name}" "${client_pub}" "${client_ip}" "${psk}"
 
-        # Apply to running wg0 immediately. Use wg syncconf (safer than wg set
-        # which doesn't always persist + can be confused by PSK via stdin).
+        # Apply to running wg0 immediately via wg syncconf (safer than wg set
+        # which doesn't always persist + is fiddly with PSK over stdin).
+        # Old logic did `wg set wg0 peer ... remove` here first, but that was
+        # a no-op — the kernel hasn't seen this peer yet (we haven't syncconf'd
+        # it). Removing the dead line; the append + syncconf below is sufficient.
         if has_cmd wg; then
-            # Apply to running wg0 immediately. Use wg syncconf (safer than
-            # wg set which doesn't always persist + is fiddly with PSK over stdin).
-            wg set wg0 peer "${client_pub}" remove 2>/dev/null || true
-
             # Append to wg0.conf (idempotent: skip if already present)
             if ! grep -q "^# client: ${name}\$" "${WG_CONF}"; then
                 cat >> "${WG_CONF}" <<EOF

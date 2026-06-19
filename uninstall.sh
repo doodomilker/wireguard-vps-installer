@@ -59,6 +59,14 @@ fi
 msg_step "Removing /usr/local/bin/wgmgr"
 run rm -f /usr/local/bin/wgmgr
 
+# Also remove the lib directory (mirrors wgmgr's do_full_uninstall behavior —
+# keeps uninstall.sh and wgmgr cmd_uninstall in sync, so neither leaves residue)
+msg_step "Removing /usr/local/share/wgmgr (lib dir)"
+if [[ -d /usr/local/share/wgmgr ]]; then
+    run rm -rf /usr/local/share/wgmgr
+    msg_ok "Removed /usr/local/share/wgmgr/"
+fi
+
 msg_step "Removing IP forwarding sysctl"
 run rm -f /etc/sysctl.d/99-wireguard.conf
 

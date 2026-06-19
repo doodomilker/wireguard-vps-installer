@@ -1,5 +1,12 @@
 # wireguard-vps-installer
 
+## 状态
+
+**状态**: `done` — 已收口，默认不继续推进。
+- 状态：`done`
+
+继续工作先看 `PROGRESS.md` 顶部接续卡片.
+
 One-command WireGuard installer for Debian / Ubuntu / CentOS Stream VPS.  
 Generates server config, a default client, prints conf + QR code + scp command, and installs a global `wgmgr` menu for ongoing management.
 

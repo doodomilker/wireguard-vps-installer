@@ -237,6 +237,7 @@ chk "conf has [Interface]"     grep -q "^\[Interface\]$" "${conf}"
 chk "conf has [Peer]"          grep -q "^\[Peer\]$"     "${conf}"
 chk "conf has correct endpoint" grep -q "Endpoint = 203.0.113.42:51820" "${conf}"
 chk "conf has DNS"             grep -q "DNS = 1.1.1.1, 8.8.8.8" "${conf}"
+chk "conf has PresharedKey when PSK enabled" grep -q "^PresharedKey = mock-wg-psk-" "${conf}"
 chk "conf has full-tunnel AllowedIPs" grep -q "AllowedIPs = 0.0.0.0/0" "${conf}"
 chk "conf has client IP .2 or .3" grep -qE "Address = 10\.0\.0\.[23]/32" "${conf}"
 

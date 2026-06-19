@@ -94,15 +94,25 @@ EOF
 # ----- Convert CIDR to Nth host address -----
 # Args: subnet_cidr index
 # Example: subnet_to_host 10.0.0.0/24 1  ->  10.0.0.1
+# Returns 1 (and prints to stderr) if idx would exceed the subnet's host range.
+# For /24: max valid idx = 254 (host .1-.254; .0 is network, .255 is broadcast).
 subnet_to_host() {
     local cidr="$1"
     local idx="$2"
     local ip="${cidr%/*}"
     local prefix="${cidr#*/}"
     IFS='.' read -r o1 o2 o3 o4 <<<"${ip}"
-    # Only handle /24 cleanly — that's our default; for other subnets use python or bc
+
+    # /24 boundary check: idx must satisfy 0 <= o4+idx <= 255.
+    # We don't try to be clever about non-/24 subnets below — those go through
+    # python3, which has its own length check.
     if [[ "${prefix}" == "24" ]]; then
-        printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "$((o4 + idx))"
+        local host_octet=$((o4 + idx))
+        if (( host_octet > 254 || host_octet < 1 )); then
+            msg_err "subnet_to_host: idx=${idx} would yield ${ip%.*}.${host_octet}, out of /24 host range (1-254)"
+            return 1
+        fi
+        printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "${host_octet}"
     else
         # Fallback: ipcalc-style (if available), else print original
         if has_cmd python3; then
@@ -117,7 +127,12 @@ else:
 "
         else
             # Crude: assume /24, strip suffix and add idx
-            printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "$((o4 + idx))"
+            local host_octet=$((o4 + idx))
+            if (( host_octet > 254 || host_octet < 1 )); then
+                msg_err "subnet_to_host: idx=${idx} would yield ${ip%.*}.${host_octet}, out of /24 host range (1-254)"
+                return 1
+            fi
+            printf "%d.%d.%d.%d" "${o1}" "${o2}" "${o3}" "${host_octet}"
         fi
     fi
 }
