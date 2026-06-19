@@ -68,15 +68,31 @@ if [[ -d /usr/local/share/wgmgr ]]; then
 fi
 
 msg_step "Removing IP forwarding sysctl"
+if [[ "${DRYRUN:-0}" != "1" ]]; then
+    sysctl -w net.ipv4.ip_forward=0 >/dev/null 2>&1 || msg_warn "Failed to reset runtime net.ipv4.ip_forward to 0"
+fi
 run rm -f /etc/sysctl.d/99-wireguard.conf
 
 msg_step "Uninstalling packages (optional)"
 if confirm "Also remove wireguard-tools, qrencode, iptables-persistent packages?" "N"; then
     case "${PKG_MANAGER}" in
-        apt) apt-get purge -y --auto-remove wireguard qrencode iptables-persistent || true ;;
-        dnf) dnf remove -y wireguard-tools qrencode iptables-services || true ;;
+        apt)
+            if apt-get purge -y --auto-remove wireguard qrencode iptables-persistent; then
+                msg_ok "Packages removed"
+            else
+                msg_err "Package removal failed (apt). WireGuard config is gone, but some packages remain installed."
+                exit 1
+            fi
+            ;;
+        dnf)
+            if dnf remove -y wireguard-tools qrencode iptables-services; then
+                msg_ok "Packages removed"
+            else
+                msg_err "Package removal failed (dnf). WireGuard config is gone, but some packages remain installed."
+                exit 1
+            fi
+            ;;
     esac
-    msg_ok "Packages removed"
 else
     msg_info "Skipped package removal"
 fi

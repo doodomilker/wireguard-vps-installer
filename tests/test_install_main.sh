@@ -383,6 +383,24 @@ else
 fi
 
 echo ""
+echo "=== Minor #6 regression: uninstall.sh resets runtime ip_forward and reports package failures honestly ==="
+if grep -qE 'sysctl -w net\.ipv4\.ip_forward=0' "${ROOT_DIR}/uninstall.sh"; then
+    chk "uninstall.sh resets runtime ip_forward to 0" true
+else
+    chk "uninstall.sh resets runtime ip_forward to 0" false
+fi
+if grep -qE 'apt-get purge -y --auto-remove wireguard qrencode iptables-persistent \|\| true' "${ROOT_DIR}/uninstall.sh"; then
+    chk "uninstall.sh no longer masks apt purge failure with || true" false
+else
+    chk "uninstall.sh no longer masks apt purge failure with || true" true
+fi
+if grep -qE 'msg_err "Package removal failed \(apt\)' "${ROOT_DIR}/uninstall.sh"; then
+    chk "uninstall.sh surfaces apt package removal failure" true
+else
+    chk "uninstall.sh surfaces apt package removal failure" false
+fi
+
+echo ""
 echo "=== Minor #4 regression: subnet_to_host rejects out-of-range idx ==="
 # We test the function directly via a small inline bash. The fix returns 1
 # when idx + o4 would exceed 254 (or be < 1). We source the lib and probe.
