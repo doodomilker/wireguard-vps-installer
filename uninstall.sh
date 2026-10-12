@@ -10,6 +10,10 @@ if [[ -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
     source "${SCRIPT_DIR}/lib/common.sh"
     source "${SCRIPT_DIR}/lib/network.sh"
     source "${SCRIPT_DIR}/lib/server.sh"
+    # relay.sh only exists in installs updated after the relay feature landed.
+    if [[ -f "${SCRIPT_DIR}/lib/relay.sh" ]]; then
+        source "${SCRIPT_DIR}/lib/relay.sh"
+    fi
 else
     echo "[✗] lib/ not found next to uninstall.sh." >&2
     exit 1
@@ -49,6 +53,13 @@ run stop_and_disable_wg
 
 msg_step "Removing iptables NAT rules"
 run remove_nat_rules "${WG_SUBNET}" "eth0"
+
+# Relay (中转) teardown must run BEFORE ${WG_DIR} is deleted: wg-quick down
+# reads wg1.conf to undo its own PostUp rules.
+if declare -F relay_entry_disable >/dev/null 2>&1; then
+    msg_step "Removing relay (中转) configuration"
+    run relay_entry_disable || msg_warn "relay 清理后仍有残留，请手动检查 wg1 / table 100"
+fi
 
 msg_step "Removing wireguard configs and clients"
 if [[ -d "${WG_DIR}" ]]; then

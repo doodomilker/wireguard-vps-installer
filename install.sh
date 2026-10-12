@@ -149,6 +149,27 @@ pkg_install() {
     esac
 }
 
+# ----- WireGuard package set (shared by server mode + relay mode) -----
+install_wg_packages() {
+    msg_step "Installing WireGuard and helpers"
+
+    local pkgs=()
+    case "${PKG_MANAGER}" in
+        apt)
+            pkgs=(wireguard qrencode iptables-persistent)
+            ;;
+        dnf)
+            # Enable EPEL for qrencode on RHEL-based
+            if ! has_cmd qrencode; then
+                dnf install -y epel-release || msg_warn "epel-release install failed (qrencode may not be available)"
+            fi
+            pkgs=(wireguard-tools qrencode iptables-services)
+            ;;
+    esac
+
+    run pkg_install "${pkgs[@]}"
+}
+
 # ----- Command exists -----
 has_cmd() {
     command -v "$1" &>/dev/null
@@ -893,6 +914,308 @@ print_server_summary() {
     printf "  %-18s %s\n" "Clients dir:"     "${WG_CLIENTS_DIR}"
     printf "  %-18s %s\n" "Service:"         "wg-quick@wg0.service"
 }
+# ===== Inline relay subset (mirrors lib/relay.sh — EXIT node side) =====
+# install.sh must stay runnable as `curl | bash`, so the relay helpers it needs
+# are inlined here exactly like the other lib sections above.
+# Keep in sync with lib/relay.sh — same function names, same rendered output.
+WG_RELAY_IF="${WG_RELAY_IF:-wg1}"
+WG_RELAY_DIR="${WG_RELAY_DIR:-/etc/wireguard}"
+WG_RELAY_CONF="${WG_RELAY_CONF:-${WG_RELAY_DIR}/wg1.conf}"
+WG_RELAY_PAYLOAD_FILE="${WG_RELAY_PAYLOAD_FILE:-${WG_RELAY_DIR}/relay-payload.txt}"
+WG_RELAY_PORT_DEFAULT="${WG_RELAY_PORT_DEFAULT:-51821}"
+WG_RELAY_SUBNET="${WG_RELAY_SUBNET:-10.77.0.0/24}"
+WG_RELAY_ENTRY_ADDR="${WG_RELAY_ENTRY_ADDR:-10.77.0.1}"
+WG_RELAY_EXIT_ADDR="${WG_RELAY_EXIT_ADDR:-10.77.0.2}"
+WG_RELAY_REPO_RAW="${WG_RELAY_REPO_RAW:-https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main}"
+
+relay_b64_encode() {
+    base64 | tr -d '\n'
+}
+
+# Args: exit_endpoint exit_pubkey entry_privkey entry_addr exit_addr psk [client_subnet] [name]
+relay_payload_build() {
+    local exit_endpoint="$1"
+    local exit_pubkey="$2"
+    local entry_privkey="$3"
+    local entry_addr="$4"
+    local exit_addr="$5"
+    local psk="$6"
+    local client_subnet="${7:-}"
+    local name="${8:-exit1}"
+
+    {
+        printf 'v=1\n'
+        printf 'kind=wg-relay\n'
+        printf 'name=%s\n'          "${name}"
+        printf 'exit_endpoint=%s\n' "${exit_endpoint}"
+        printf 'exit_pubkey=%s\n'   "${exit_pubkey}"
+        printf 'entry_privkey=%s\n' "${entry_privkey}"
+        printf 'entry_addr=%s\n'    "${entry_addr}"
+        printf 'exit_addr=%s\n'     "${exit_addr}"
+        printf 'psk=%s\n'           "${psk}"
+        printf 'client_subnet=%s\n' "${client_subnet}"
+    } | relay_b64_encode
+}
+
+# Args: exit_privkey entry_pubkey psk port exit_addr entry_tunnel_ip relay_subnet egress_if
+relay_exit_conf_render() {
+    local exit_priv="$1"
+    local entry_pub="$2"
+    local psk="$3"
+    local port="$4"
+    local exit_addr="$5"
+    local entry_tunnel_ip="$6"
+    local relay_subnet="$7"
+    local egress_if="$8"
+
+    cat <<EOF
+# WireGuard relay listener (${WG_RELAY_IF}) — EXIT node, managed by wireguard-vps-installer
+# This machine is the internet-facing egress for the entry node's clients.
+# Traffic arrives from the entry (${entry_tunnel_ip}) and is NATed out ${egress_if}.
+[Interface]
+PrivateKey = ${exit_priv}
+Address = ${exit_addr}/24
+ListenPort = ${port}
+MTU = 1420
+PostUp = sysctl -w net.ipv4.conf.%i.rp_filter=2; sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i %i -o ${egress_if} -j ACCEPT; iptables -A FORWARD -i ${egress_if} -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s ${relay_subnet} -o ${egress_if} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -o ${egress_if} -j ACCEPT; iptables -D FORWARD -i ${egress_if} -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s ${relay_subnet} -o ${egress_if} -j MASQUERADE
+
+[Peer]
+# Entry node — it is the only peer allowed to enter this listener.
+PublicKey = ${entry_pub}
+$(if [[ -n "${psk}" ]]; then printf 'PresharedKey = %s\n' "${psk}"; fi)
+AllowedIPs = ${entry_tunnel_ip}/32
+EOF
+}
+
+relay_detect_egress_iface() {
+    local iface
+    iface="$(ip route 2>/dev/null | awk '/^default/ {print $5; exit}' || true)"
+    if [[ -z "${iface}" ]]; then
+        iface="eth0"
+    fi
+    printf '%s' "${iface}"
+}
+
+# Args: exit_privkey entry_pubkey psk port exit_addr entry_tunnel_ip relay_subnet egress_if
+relay_exit_write_conf() {
+    local exit_priv="$1" entry_pub="$2" psk="$3" port="$4" exit_addr="$5"
+    local entry_tunnel_ip="$6" relay_subnet="$7" egress_if="$8"
+
+    mkdir -p "$(dirname "${WG_RELAY_CONF}")"
+    chmod 700 "$(dirname "${WG_RELAY_CONF}")" 2>/dev/null || true
+    relay_exit_conf_render "${exit_priv}" "${entry_pub}" "${psk}" "${port}" \
+        "${exit_addr}" "${entry_tunnel_ip}" "${relay_subnet}" "${egress_if}" \
+        >"${WG_RELAY_CONF}"
+    chmod 600 "${WG_RELAY_CONF}"
+    msg_ok "Wrote ${WG_RELAY_CONF}"
+}
+
+relay_persist_ip_forward() {
+    local conf="/etc/sysctl.d/99-wireguard-relay.conf"
+    if [[ "${DRYRUN}" == "1" ]]; then
+        msg_info "[dryrun] would write ${conf} (net.ipv4.ip_forward=1)"
+        return 0
+    fi
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    if [[ ! -f "${conf}" ]] || ! grep -q "ip_forward=1" "${conf}" 2>/dev/null; then
+        echo "net.ipv4.ip_forward=1" >"${conf}"
+        msg_ok "Wrote ${conf}"
+    else
+        msg_info "IP forwarding already persistent in ${conf}"
+    fi
+}
+
+relay_iface_up() {
+    if [[ "${DRYRUN}" == "1" ]]; then
+        msg_info "[dryrun] would: systemctl enable --now wg-quick@${WG_RELAY_IF}"
+        return 0
+    fi
+    if ! has_cmd systemctl; then
+        msg_err "systemctl not found — cannot enable wg-quick@${WG_RELAY_IF}"
+        return 1
+    fi
+    systemctl enable "wg-quick@${WG_RELAY_IF}.service" &>/dev/null || true
+    if ! systemctl restart "wg-quick@${WG_RELAY_IF}.service"; then
+        msg_err "wg-quick@${WG_RELAY_IF} failed to start"
+        systemctl status "wg-quick@${WG_RELAY_IF}.service" --no-pager || true
+        return 1
+    fi
+    sleep 1
+    if systemctl is-active --quiet "wg-quick@${WG_RELAY_IF}.service"; then
+        msg_ok "wg-quick@${WG_RELAY_IF} is active"
+        return 0
+    fi
+    msg_err "wg-quick@${WG_RELAY_IF} not active"
+    systemctl status "wg-quick@${WG_RELAY_IF}.service" --no-pager || true
+    return 1
+}
+
+relay_payload_save() {
+    local payload="$1"
+    if [[ "${DRYRUN}" == "1" ]]; then
+        msg_info "[dryrun] would save payload to ${WG_RELAY_PAYLOAD_FILE}"
+        return 0
+    fi
+    mkdir -p "$(dirname "${WG_RELAY_PAYLOAD_FILE}")"
+    printf '%s\n' "${payload}" >"${WG_RELAY_PAYLOAD_FILE}"
+    chmod 600 "${WG_RELAY_PAYLOAD_FILE}"
+    msg_ok "Payload saved: ${WG_RELAY_PAYLOAD_FILE}"
+}
+
+# ---------- Role selection (server vs relay exit node) ----------
+install_usage() {
+    cat <<EOF
+wireguard-vps-installer — install.sh
+
+Usage:
+  sudo ./install.sh                     交互选择角色（默认: 服务端）
+  curl -fsSL .../install.sh | sudo bash  同上（非交互时默认服务端）
+
+角色 / 模式:
+  --mode server        本机作为 WireGuard 服务端（默认，客户端直连本机出网）
+  --mode relay-exit    本机作为中转到落地机（客户端仍连【入口 VPS】，出网走本机）
+
+选项:
+  --port <port>              服务端模式监听端口（默认 51820）
+  --subnet <cidr>            服务端子网（默认 10.0.0.0/24）
+  --dns "<dns1, dns2>"       客户端 DNS（默认 1.1.1.1, 8.8.8.8）
+  --endpoint <ip:port>       公网 endpoint 覆盖（NAT/域名场景）
+  --relay-port <port>        中转模式监听端口（默认 51821）
+  --yes, -y                  跳过确认（脚本模式）
+  -h, --help                 显示本帮助
+EOF
+}
+
+# Sets INSTALL_MODE=server|relay-exit. Prompts only on an interactive tty and
+# only when --mode was not passed — so `curl | bash`, cron and CI keep the
+# original server behaviour untouched.
+install_select_mode() {
+    case "${INSTALL_MODE}" in
+        ""|server)     INSTALL_MODE="${INSTALL_MODE:-server}" ;;
+        relay|relay-exit) INSTALL_MODE="relay-exit" ;;
+        *)
+            msg_err "Unknown --mode: '${INSTALL_MODE}' (expected: server | relay-exit)"
+            exit 1
+            ;;
+    esac
+
+    # --mode given → explicit choice, never prompt.
+    [[ -n "${INSTALL_MODE_EXPLICIT:-}" ]] && return 0
+    # Non-interactive (curl | bash, cron) → keep the historical default.
+    [[ ! -t 0 ]] && return 0
+
+    printf '\n%s== 选择本机角色 ==%s\n' "${C_BOLD}${C_BLUE}" "${C_RESET}"
+    printf '  1) 服务端（默认）：客户端直连本机，出网 IP = 本机\n'
+    printf '  2) 中转落地机：客户端仍连【入口 VPS】的 IP，出网走本机(美国 VPS 场景)\n'
+    printf '请选择 [1/2] (默认 1): '
+    local choice=""
+    read -r choice || true
+    case "${choice}" in
+        2|relay|relay-exit|Relay|R) INSTALL_MODE="relay-exit" ;;
+        *) INSTALL_MODE="server" ;;
+    esac
+    msg_ok "模式: ${INSTALL_MODE}"
+}
+
+# ---------- Relay EXIT node main flow (mode 2) ----------
+relay_exit_main() {
+    msg_banner "Relay EXIT node — 中转落地机模式"
+
+    local relay_port="${WG_RELAY_PORT:-${WG_RELAY_PORT_DEFAULT}}"
+    if [[ -t 0 && -z "${WG_RELAY_PORT:-}" ]]; then
+        printf '中转隧道监听端口 (回车用默认 %s): ' "${WG_RELAY_PORT_DEFAULT}"
+        local answer=""
+        read -r answer || true
+        [[ -n "${answer}" ]] && relay_port="${answer}"
+    fi
+    if ! [[ "${relay_port}" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
+        msg_err "非法中转端口: '${relay_port}'"
+        exit 1
+    fi
+    if ! port_is_free "${relay_port}"; then
+        msg_err "端口 ${relay_port} 已被占用 — 用 --relay-port <port> 另选一个"
+        exit 1
+    fi
+
+    # ---------- Packages ----------
+    install_wg_packages
+
+    # ---------- Public IP (this node is the endpoint the entry dials) ----------
+    msg_step "Detecting public endpoint"
+    if ! detect_public_ip; then
+        msg_err "无法探测本机公网 IPv4，请用 --endpoint <ip:port> 指定"
+        exit 1
+    fi
+
+    # ---------- Keys ----------
+    # Called directly (not via run) because gen_keypair sets globals in the
+    # caller's scope and has its own DRYRUN mock branch.
+    msg_step "Generating relay keys (entry side + exit side + PSK)"
+    if [[ "${PKG_MANAGER}" == "dnf" ]]; then
+        run modprobe wireguard 2>/dev/null || true
+    fi
+    gen_keypair "RELAY_ENTRY"
+    gen_keypair "RELAY_EXIT"
+    local psk=""
+    if [[ "${USE_PSK}" == "1" ]]; then
+        psk="$(gen_psk)"
+    fi
+
+    # ---------- Listener config ----------
+    msg_step "Writing relay listener config"
+    local egress_if
+    egress_if="$(relay_detect_egress_iface)"
+    msg_info "Egress interface: ${egress_if}"
+    relay_exit_write_conf "${RELAY_EXIT_PRIVATE}" "${RELAY_ENTRY_PUBLIC}" "${psk}" \
+        "${relay_port}" "${WG_RELAY_EXIT_ADDR}" "${WG_RELAY_ENTRY_ADDR}" \
+        "${WG_RELAY_SUBNET}" "${egress_if}"
+    relay_persist_ip_forward
+
+    # ---------- Bring up the listener ----------
+    if ! relay_iface_up; then
+        msg_err "中转接口启动失败 — 检查: journalctl -u wg-quick@${WG_RELAY_IF}"
+        exit 1
+    fi
+
+    # ---------- Enrollment payload for the entry node ----------
+    local endpoint="${PUBLIC_IP}:${relay_port}"
+    local payload
+    payload="$(relay_payload_build "${endpoint}" "${RELAY_EXIT_PUBLIC}" "${RELAY_ENTRY_PRIVATE}" \
+        "${WG_RELAY_ENTRY_ADDR}" "${WG_RELAY_EXIT_ADDR}" "${psk}" "" "exit1")"
+    relay_payload_save "${payload}"
+
+    relay_print_enroll_summary "${payload}" "${endpoint}" "${relay_port}" "${PUBLIC_IP}" "${egress_if}"
+    exit 0
+}
+
+relay_print_enroll_summary() {
+    local payload="$1" endpoint="$2" port="$3" public_ip="$4" egress_if="$5"
+
+    msg_banner "中转落地机（EXIT）已就绪"
+    printf "  %-18s %s\n" "Public IP:"   "${public_ip}"
+    printf "  %-18s %s\n" "Relay endpoint:" "${endpoint}"
+    printf "  %-18s %s\n" "ListenPort:"   "${port}"
+    printf "  %-18s %s\n" "Tunnel subnet:" "${WG_RELAY_SUBNET}"
+    printf "  %-18s %s\n" "Config:"       "${WG_RELAY_CONF}"
+    printf "  %-18s %s\n" "Service:"      "wg-quick@${WG_RELAY_IF}.service"
+    printf "  %-18s %s\n" "Egress iface:" "${egress_if}"
+
+    msg_step "NEXT STEPS"
+    cat <<EOF
+  1) 在本机云防火墙放行 UDP ${port}（入口机要拨进来；入口机侧不需要任何入站改动）
+  2) 把下面这条命令复制到【旧 VPS / 入口机】执行一次 — 它会自己下载所需脚本，无需预装：
+       curl -fsSL ${WG_RELAY_REPO_RAW}/relay-entry.sh | sudo bash -s -- --enroll '${payload}'
+  3) 入口机执行完成后回到本机验证握手：
+       wg show ${WG_RELAY_IF}          # 应看到 latest handshake: N seconds ago
+  4) 手机连上 VPN 后打开 https://ifconfig.me —— 显示的应该是本机 IP ${public_ip}
+     （拨号 endpoint 仍是入口机 IP，客户端配置一个字都不用改）
+  5) 关闭中转：去入口机执行  sudo relay-entry.sh --disable --yes
+
+  PAYLOAD（已在 ${WG_RELAY_PAYLOAD_FILE}，0600；含入口机侧私钥，别外传）:
+  ${payload}
+EOF
+}
 # ===== Script setup =====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo ".")"
 if [[ -f "${SCRIPT_DIR}/wgmgr" ]]; then
@@ -902,6 +1225,43 @@ else
 fi
 
 # ===== Main install logic =====
+# ---------- CLI parsing ----------
+# Historically install.sh parsed NO flags at all: docs/customization.md advertised
+# --port / --subnet / --dns / --endpoint, but they were silently ignored and the
+# defaults always won. This parser makes those documented flags real and adds the
+# relay flags. Everything here only overrides the defaults below.
+INSTALL_MODE="${INSTALL_MODE:-}"
+INSTALL_MODE_EXPLICIT=""
+ASSUME_YES="${ASSUME_YES:-0}"
+WG_RELAY_PORT="${WG_RELAY_PORT:-}"
+
+while [[ $# -gt 0 ]]; do
+    # Normalise --flag=value into --flag value
+    case "$1" in
+        --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+        --mode|--relay-port|--port|--subnet|--dns|--endpoint)
+            if [[ $# -lt 2 ]]; then
+                msg_err "$1 缺少取值"
+                exit 1
+            fi
+            case "$1" in
+                --mode)       INSTALL_MODE="$2"; INSTALL_MODE_EXPLICIT=1 ;;
+                --relay-port) WG_RELAY_PORT="$2" ;;
+                --port)       WG_PORT="$2" ;;
+                --subnet)     WG_SUBNET="$2" ;;
+                --dns)        WG_DNS="$2" ;;
+                --endpoint)   SERVER_ENDPOINT_OVERRIDE="$2" ;;
+            esac
+            shift 2
+            ;;
+        --yes|-y)        ASSUME_YES=1; shift ;;
+        -h|--help|help)  install_usage; exit 0 ;;
+        *)               shift ;;   # unknown flags keep the old ignore behaviour
+    esac
+done
+
 # ---------- Defaults ----------
 WG_PORT="${WG_PORT:-51820}"
 WG_SUBNET="${WG_SUBNET:-10.0.0.0/24}"
@@ -917,33 +1277,25 @@ detect_os
 check_os_ok
 msg_ok "OS: ${OS_PRETTY}  (pkg: ${PKG_MANAGER})"
 
+# ---------- Role selection: server (default) vs relay exit node ----------
+# Mode 2 keeps the client endpoint unchanged (still the ENTRY VPS) and makes this
+# machine the internet-facing egress. Server mode below is untouched.
+install_select_mode
+if [[ "${INSTALL_MODE}" == "relay-exit" ]]; then
+    relay_exit_main
+fi
+
 # ---------- Idempotency: if already installed, prompt ----------
 if [[ -f "${WG_CONF}" && "${DRYRUN}" != "1" ]]; then
     msg_warn "Existing WireGuard install detected at ${WG_CONF}"
-    if ! confirm "Reconfigure? (This will add a new client and reload wg0)" "N"; then
+    if [[ "${ASSUME_YES}" != "1" ]] && ! confirm "Reconfigure? (This will add a new client and reload wg0)" "N"; then
         msg_info "Aborting."
         exit 0
     fi
 fi
 
 # ---------- Install packages ----------
-msg_step "Installing WireGuard and helpers"
-
-WG_REQUIRED_PKGS=()
-case "${PKG_MANAGER}" in
-    apt)
-        WG_REQUIRED_PKGS=(wireguard qrencode iptables-persistent)
-        ;;
-    dnf)
-        # Enable EPEL for qrencode on RHEL-based
-        if ! has_cmd qrencode; then
-            dnf install -y epel-release || msg_warn "epel-release install failed (qrencode may not be available)"
-        fi
-        WG_REQUIRED_PKGS=(wireguard-tools qrencode iptables-services)
-        ;;
-esac
-
-run pkg_install "${WG_REQUIRED_PKGS[@]}"
+install_wg_packages
 
 # ---------- Detect public IP ----------
 msg_step "Detecting public endpoint"
@@ -982,7 +1334,7 @@ fi
 # Sanity: port not in use
 if ! port_is_free "${WG_PORT}"; then
     msg_warn "Port ${WG_PORT} appears to be in use on this host."
-    if ! confirm "Continue anyway?" "N"; then
+    if [[ "${ASSUME_YES}" != "1" ]] && ! confirm "Continue anyway?" "N"; then
         exit 1
     fi
 fi
@@ -1045,13 +1397,17 @@ if [[ -z "${WGMGR_SOURCE}" ]]; then
     run mkdir -p /usr/local/share/wgmgr/lib
     if [[ -z "${WGMGR_LIB_SOURCE}" || ! -d "${WGMGR_LIB_SOURCE}" ]]; then
         # curl | bash with no local lib: download each lib
-        for libf in common.sh network.sh server.sh client.sh; do
+        for libf in common.sh network.sh server.sh client.sh relay.sh; do
             run curl -fsSL "https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/lib/${libf}" -o "/usr/local/share/wgmgr/lib/${libf}"
         done
     else
         run cp "${WGMGR_LIB_SOURCE}"/*.sh /usr/local/share/wgmgr/lib/
     fi
     run chmod 644 /usr/local/share/wgmgr/lib/*.sh
+    # Relay entry-node tool (used on the ENTRY machine: relay-entry.sh --enroll).
+    # Non-fatal: a server-mode install must not fail because this extra download did.
+    run curl -fsSL "https://raw.githubusercontent.com/doodomilker/wireguard-vps-installer/main/relay-entry.sh" -o /usr/local/share/wgmgr/relay-entry.sh || msg_warn "relay-entry.sh download failed (relay mode unavailable until updated)"
+    run chmod 755 /usr/local/share/wgmgr/relay-entry.sh
     msg_ok "Installed ${WGMGR_TARGET} (curl|bash mode)"
 elif [[ -n "${WGMGR_SOURCE}" && -f "${SCRIPT_DIR}/wgmgr" ]]; then
     # git clone mode: install wgmgr + libs from local checkout (no network)
@@ -1060,6 +1416,10 @@ elif [[ -n "${WGMGR_SOURCE}" && -f "${SCRIPT_DIR}/wgmgr" ]]; then
     run mkdir -p /usr/local/share/wgmgr/lib
     run cp "${SCRIPT_DIR}/lib"/*.sh /usr/local/share/wgmgr/lib/
     run chmod 644 /usr/local/share/wgmgr/lib/*.sh
+    # Relay entry-node tool (used on the ENTRY machine: relay-entry.sh --enroll)
+    if [[ -f "${SCRIPT_DIR}/relay-entry.sh" ]]; then
+        run install -m 0755 "${SCRIPT_DIR}/relay-entry.sh" /usr/local/share/wgmgr/relay-entry.sh
+    fi
     msg_ok "Installed /usr/local/bin/wgmgr"
 else
     msg_warn "wgmgr not found — skipping global install"

@@ -27,6 +27,12 @@ source "${_LIB_DIR}/common.sh"
 source "${_LIB_DIR}/network.sh"
 source "${_LIB_DIR}/server.sh"
 source "${_LIB_DIR}/client.sh"
+# relay.sh ships with installs updated after the relay feature landed; older
+# installs simply don't have it and `wgmgr relay` reports that honestly.
+if [[ -f "${_LIB_DIR}/relay.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${_LIB_DIR}/relay.sh"
+fi
 
 WG_DIR="/etc/wireguard"
 WG_CONF="${WG_DIR}/wg0.conf"
@@ -528,6 +534,41 @@ cmd_reinstall() {
     fi
 }
 
+# ---------- Relay (中转) management ----------
+# Entry machine: wg1 is the uplink it dials to the exit node.
+# Exit machine:  wg1 is the listener the entry dials into.
+cmd_relay() {
+    local action="${1:-status}"
+
+    if ! declare -F relay_entry_status >/dev/null 2>&1; then
+        echo_red "本机尚无 relay 组件 — 先跑一次 install.sh 更新（或 curl relay-entry.sh）"
+        exit 1
+    fi
+
+    case "${action}" in
+        status|st|"")
+            relay_entry_status || true
+            ;;
+        disable|off|down)
+            if ! confirm_destructive "关闭中转？客户端将恢复直接从本机出网（wg0 与客户端配置不动）"; then
+                echo_red "已取消"
+                return 0
+            fi
+            relay_entry_disable || true
+            ;;
+        -h|--help|help)
+            cat <<EOF
+sudo wgmgr relay status     查看中转状态（角色 / 握手 / 策略路由 / NAT）
+sudo wgmgr relay disable    关闭中转（可逆；加 --yes 跳过确认）
+EOF
+            ;;
+        *)
+            echo_red "未知 relay 动作: ${action}（可用: status | disable）"
+            exit 1
+            ;;
+    esac
+}
+
 # ---------- Main Menu ----------
 show_menu() {
     require_installed
@@ -554,6 +595,9 @@ show_menu() {
         echo_yellow "  7. 查看服务器配置"
         echo_yellow "  8. 重装 WireGuard (清空再装)"
         echo_yellow "  9. 卸载 WireGuard (只清除)"
+        echo ""
+        echo_sky "━━━━━━━━━━ 中转管理（如已配置） ━━━━━━━━━━━"
+        echo_yellow "  r. 中转状态 / 关闭中转"
         echo_yellow "  0. 退出"
         separator
         printf '\033[33m请选择 [0-9]: \033[0m'
@@ -571,6 +615,7 @@ show_menu() {
             7) cmd_config; read -r -p "按 Enter 返回菜单..." _ ;;
             8) cmd_reinstall; read -r -p "按 Enter 返回菜单..." _ ;;
             9) cmd_uninstall; read -r -p "按 Enter 返回菜单..." _ ;;
+            r|R) cmd_relay status; read -r -p "按 Enter 返回菜单..." _ ;;
             0|q|Q) exit 0 ;;
             *) echo_red "无效选项: ${choice}"; read -r -p "按 Enter 继续..." _ ;;
         esac
@@ -590,6 +635,7 @@ case "${1:-menu}" in
     reinstall)             shift; cmd_reinstall "$@" ;;
     uninstall)             shift; cmd_uninstall "$@" ;;
     purge|rm-pkgs)         shift; cmd_purge "$@" ;;
+    relay)                 shift; cmd_relay "$@" ;;
     -h|--help|help)
         cat <<EOF
 wgmgr — WireGuard 管理器
@@ -606,6 +652,8 @@ wgmgr — WireGuard 管理器
   sudo wgmgr reinstall          重装 (清空所有配置再装一遍)
   sudo wgmgr uninstall          卸载 (只清除, 保留软件包)
   sudo wgmgr purge              完全删除 (含 wireguard / qrencode 等软件包)
+  sudo wgmgr relay status       查看中转状态（入口机 / 落地机通用）
+  sudo wgmgr relay disable      关闭中转（客户端恢复直接走本机出网）
 
 选项:
   --yes, -y   跳过确认（脚本模式）
