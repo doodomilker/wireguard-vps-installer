@@ -252,6 +252,30 @@ assert_contains() {
     return 0   # never let set -e kill the test
 }
 
+assert_not_contains() {
+    local label="$1" needle="$2" haystack="$3"
+    if [[ "${haystack}" != *"${needle}"* ]]; then
+        printf "  \033[32m✓\033[0m %s\n" "${label}"
+        PASS=$((PASS + 1))
+    else
+        printf "  \033[31m✗\033[0m %s\n        should NOT contain: %q\n" "${label}" "${needle}"
+        FAIL=$((FAIL + 1))
+    fi
+    return 0
+}
+
+assert_eq() {
+    local label="$1" want="$2" got="$3"
+    if [[ "${want}" == "${got}" ]]; then
+        printf "  \033[32m✓\033[0m %s\n" "${label}"
+        PASS=$((PASS + 1))
+    else
+        printf "  \033[31m✗\033[0m %s\n        want: %q\n        got:  %q\n" "${label}" "${want}" "${got}"
+        FAIL=$((FAIL + 1))
+    fi
+    return 0
+}
+
 # ---- 1. cmd_list shows existing clients ----
 echo ""
 echo "[wgmgr list]"
@@ -362,10 +386,49 @@ assert_contains "remove has y/N confirm"  "确认删除"  "${menu_text}"
 # supports --yes flag
 assert_contains "supports --yes flag"  "--yes" "${menu_text}"
 # Bug fix: cmd_add must use wg syncconf (not wg set) and append to wg0.conf
-assert_contains "cmd_add uses wg syncconf" "wg syncconf wg0 -" "${menu_text}"
+assert_contains "cmd_add uses wg syncconf" "wg syncconf wg0" "${menu_text}"
 assert_contains "cmd_add writes to wg0.conf" 'WG_CONF}' "${menu_text}"
 # Idempotent guard: should check if client block already exists
 assert_contains "cmd_add idempotent guard" "grep -q" "${menu_text}"
+
+# ── Regression: client public key must be DERIVED from the client conf ──
+# A client conf carries NO copy of the client's own public key: its
+# `PublicKey = ...` line is the SERVER's key. Whole-file greps therefore
+# (a) embedded a bogus server key in every newly added client (handshake
+# never completes) and (b) registered/removed a peer under another
+# client's key — `remove` would take a different device offline.
+AWK_CLIENT_PRIV='/^\[Interface\]/{i=1;next} /^\[/{i=0} i && /^PrivateKey[[:space:]]*=/{print $3; exit}'
+assert_contains "wgmgr derives client pubkey via helper" "client_pubkey_from_conf()" "${menu_text}"
+assert_contains "helper mirrors the client-PrivateKey awk program" "${AWK_CLIENT_PRIV}" "${menu_text}"
+assert_contains "helper pipes the private key into wg pubkey" "| wg pubkey" "${menu_text}"
+assert_not_contains "no client_pub taken from conf's PublicKey line" "client_pub=\"\$(grep -E '^PublicKey'" "${menu_text}"
+assert_contains "SERVER_PUBLIC prefers kernel truth" "wg show wg0 public-key" "${menu_text}"
+assert_not_contains "no whole-file PublicKey grep for SERVER_PUBLIC" "SERVER_PUBLIC=\"\$(grep -E '^#?PublicKey' \"\${WG_CONF}\"" "${menu_text}"
+
+# The mirrored awk program must pick the client's own PrivateKey — run it on a
+# self-contained fixture whose [Peer] PublicKey is (as in reality) the server's.
+FIXTURE_CONF="${MOCK_DIR}/regression-client.conf"
+cat > "${FIXTURE_CONF}" <<'FIXTURE_EOF'
+[Interface]
+PrivateKey = mock-priv-regression
+Address = 10.0.0.9/32
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = mock-server-pub
+AllowedIPs = 0.0.0.0/0
+FIXTURE_EOF
+derived="$(awk "${AWK_CLIENT_PRIV}" "${FIXTURE_CONF}")"
+assert_eq "fixture: derived key is the client's own private key" "mock-priv-regression" "${derived}"
+assert_not_contains "fixture: derived key is not the server key" "mock-server-pub" "${derived}"
+
+# ── Regression: applying a new peer must actually reach the kernel ──
+# `wg syncconf IFACE -` does not read stdin on wireguard-tools 1.0.20210914
+# (it fopen()s "-" → "No such file or directory"), and the previous form hid
+# the failure with `2>/dev/null || true`, so a new account never went live.
+assert_not_contains "no stdin-dash syncconf form" "syncconf wg0 -" "${menu_text}"
+assert_contains "apply uses process substitution" "wg syncconf wg0 <(wg-quick strip wg0" "${menu_text}"
+assert_contains "apply failure is surfaced" "wg syncconf 失败" "${menu_text}"
 
 echo ""
 TOTAL=$((PASS + FAIL))
