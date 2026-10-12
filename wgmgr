@@ -89,9 +89,12 @@ read_server_state() {
         echo_red "配置文件 ${WG_CONF} 不存在"
         exit 1
     fi
-    SERVER_PUBLIC="$(grep -E '^#?PublicKey' "${WG_CONF}" 2>/dev/null | awk '{print $3}' | head -1 || true)"
-    if [[ -z "${SERVER_PUBLIC}" ]] && has_cmd wg; then
-        SERVER_PUBLIC="$(wg show wg0 public-key 2>/dev/null || true)"
+    # 服务器公钥：以内核为真源。wg0.conf 的 [Interface] 段里没有 PublicKey 行，
+    # 所以对整个文件 grep PublicKey 会命中【第一个 peer】的公钥（那是客户端公钥），
+    # 于是之后新建的客户端全部携带错误的服务器公钥，手机上永远握不上手。
+    SERVER_PUBLIC="$(wg show wg0 public-key 2>/dev/null || true)"
+    if [[ -z "${SERVER_PUBLIC}" ]]; then
+        SERVER_PUBLIC="$(awk '/^\[Interface\]/{i=1;next} /^\[/{i=0} i && /^#?PublicKey[[:space:]]*=/{print $3; exit}' "${WG_CONF}" 2>/dev/null || true)"
     fi
     if [[ -z "${SERVER_PUBLIC}" ]]; then
         echo_red "无法获取服务器公钥"
@@ -158,6 +161,18 @@ cmd_list() {
     echo_green "Endpoint:   ${SERVER_ENDPOINT}"
 }
 
+# 客户端公钥只有一个可靠来源：用该 conf 里 [Interface] 的 PrivateKey 反推。
+# 绝不能 grep conf 里的 PublicKey —— 那一行是【服务器】公钥，拿它当客户端公钥
+# 会把错 key 注册成 peer（握手失败），删除时还会误删别人的 peer。
+client_pubkey_from_conf() {
+    local conf="$1"
+    local priv
+    priv="$(awk '/^\[Interface\]/{i=1;next} /^\[/{i=0} i && /^PrivateKey[[:space:]]*=/{print $3; exit}' "${conf}" 2>/dev/null || true)"
+    [[ -z "${priv}" ]] && return 1
+    has_cmd wg || return 1
+    printf '%s' "${priv}" | wg pubkey
+}
+
 cmd_add() {
     require_installed
     read_server_state
@@ -175,7 +190,11 @@ cmd_add() {
     if [[ "${DRYRUN}" != "1" ]]; then
         local conf="${WG_CLIENTS_DIR}/${name}.conf"
         local client_pub client_ip psk
-        client_pub="$(grep -E '^PublicKey' "${conf}" | awk '{print $3}' | head -1)"
+        client_pub="$(client_pubkey_from_conf "${conf}" || true)"
+        if [[ -z "${client_pub}" ]]; then
+            echo_red "无法从 ${conf} 的 PrivateKey 推导客户端公钥（缺少 wg 命令？）"
+            return 1
+        fi
         client_ip="$(grep -E '^Address' "${conf}" | awk '{print $3}' | head -1 | cut -d/ -f1)"
         psk="$(grep -E '^PresharedKey' "${conf}" | awk '{print $3}' || true)"
 
@@ -199,8 +218,18 @@ AllowedIPs = ${client_ip}/32
 EOF
             fi
 
-            # Re-parse and apply without dropping the interface
-            wg-quick strip wg0 2>/dev/null | wg syncconf wg0 - 2>/dev/null || true
+            # Re-parse and apply without dropping the interface.
+            # NB: `wg syncconf IFACE -` does NOT read stdin on wireguard-tools
+            # 1.0.20210914 (the Debian 11/13 build): it fopen()s the literal "-"
+            # and fails. The old piped form hid that behind `2>/dev/null || true`,
+            # so every newly added account silently never reached the kernel.
+            # Use process substitution, and surface a failure instead of hiding it.
+            if ! wg syncconf wg0 <(wg-quick strip wg0 2>/dev/null); then
+                echo_yellow "wg syncconf 失败，回退重启 wg-quick@wg0"
+                if ! systemctl restart wg-quick@wg0; then
+                    echo_red "重启 wg-quick@wg0 也失败 — 新账户可能尚未生效，请手工检查"
+                fi
+            fi
         fi
     fi
     echo ""
@@ -244,7 +273,7 @@ cmd_remove() {
     # Live remove from wg0
     if has_cmd wg; then
         local client_pub
-        client_pub="$(grep -E '^PublicKey' "${conf}" | awk '{print $3}' | head -1)"
+        client_pub="$(client_pubkey_from_conf "${conf}" || true)"
         if [[ -n "${client_pub}" ]]; then
             wg set wg0 peer "${client_pub}" remove 2>/dev/null || true
         fi

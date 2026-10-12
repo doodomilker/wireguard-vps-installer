@@ -199,17 +199,36 @@ remove_peer_from_server() {
         return 1
     fi
 
-    # Use awk to drop the [Peer] block that follows the "# client: NAME" marker
+    # Drop the WHOLE "[Peer]" block that follows the "# client: NAME" marker.
+    # NB: dropping only the marker + the [Peer] header leaves the block BODY
+    # (PublicKey / PresharedKey / AllowedIPs) behind; those dangling fields then
+    # sit inside [Interface] and wg-quick refuses to start the interface at all
+    # ("Line unrecognized: `PublicKey = ...'") — the whole client-facing service
+    # goes down. Skip to the next marker/header/blank line instead.
     local tmp
     tmp="$(mktemp)"
     awk -v target="${client_name}" '
-        /^# client: / {
-            if ($3 == target) { skip = 1; next }
+        /^# client: / && $3 == target { skip = 1; next }
+        skip && /^\[Peer\]/ { next }
+        skip {
+            if ($0 ~ /^# client: / || $0 ~ /^\[/ || $0 ~ /^[[:space:]]*$/) { skip = 0 } else { next }
         }
-        /^\[Peer\]/ && skip { skip = 0; next }
-        skip { next }
         { print }
     ' "${WG_CONF}" > "${tmp}"
+
+    # Guard: never install a conf whose [Interface] section carries peer fields
+    # (that is exactly the corruption described above). Refuse and keep the
+    # original file, so a removal can never take the interface offline.
+    if awk '
+        /^\[Interface\]/ { i = 1 }
+        /^\[Peer\]/ { i = 0 }
+        i && /^(PublicKey|PresharedKey|AllowedIPs|Endpoint|PersistentKeepalive)[[:space:]]*=/ { bad = 1 }
+        END { exit bad ? 0 : 1 }
+    ' "${tmp}"; then
+        rm -f "${tmp}"
+        msg_err "移除 '${client_name}' 后配置出现游离 peer 字段 — 已放弃写入，${WG_CONF} 未改动"
+        return 1
+    fi
 
     mv "${tmp}" "${WG_CONF}"
     chmod 600 "${WG_CONF}"
