@@ -1204,8 +1204,14 @@ relay_print_enroll_summary() {
     msg_step "NEXT STEPS"
     cat <<EOF
   1) 在本机云防火墙放行 UDP ${port}（入口机要拨进来；入口机侧不需要任何入站改动）
-  2) 把下面这条命令复制到【旧 VPS / 入口机】执行一次 — 它会自己下载所需脚本，无需预装：
+  2) 把下面这条命令【整行复制】到【旧 VPS / 入口机】执行一次 — 它会自己下载所需脚本，无需预装：
+       ⚠️ 一定整行复制：不要把 URL 和 | 拆成两行，也不要在 URL 后面留空格
+          （拆行会报 `curl: (3) URL rejected: Malformed input to a URL function`）
        curl -fsSL ${WG_RELAY_REPO_RAW}/relay-entry.sh | sudo bash -s -- --enroll '${payload}'
+     粘贴 payload 总出问题（折行/被截断）？改用文件方式，完全不粘贴：
+       把本机 ${WG_RELAY_PAYLOAD_FILE} 传到入口机（scp 或复制内容存成文件），然后执行
+       sudo bash relay-entry.sh --enroll-file /path/to/relay-payload.txt
+       （也可以管道： cat relay-payload.txt | sudo bash relay-entry.sh --enroll-file -）
   3) 入口机执行完成后回到本机验证握手：
        wg show ${WG_RELAY_IF}          # 应看到 latest handshake: N seconds ago
   4) 手机连上 VPN 后打开 https://ifconfig.me —— 显示的应该是本机 IP ${public_ip}

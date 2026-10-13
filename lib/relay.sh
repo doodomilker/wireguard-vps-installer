@@ -42,16 +42,27 @@ relay_b64_encode() {
 }
 
 relay_b64_decode() {
-    local data="$1" out=""
-    if out="$(printf '%s' "${data}" | base64 -d 2>/dev/null)"; then
+    local data="$1" out="" cleaned=""
+    # A payload is ONE long base64 line, so it is routinely mangled by
+    # copy/paste: terminals wrap it, chat clients insert spaces/newlines, some
+    # clients strip the trailing '='. Strip every whitespace character, accept
+    # the URL-safe alphabet and re-pad before decoding, so a wrapped payload
+    # still works. (Seen in the field: "payload base64 解码失败" on a payload
+    # that was simply line-wrapped.)
+    cleaned="$(printf '%s' "${data}" | tr -d '[:space:]' | tr '\-_' '+/')"
+    case $(( ${#cleaned} % 4 )) in
+        2) cleaned="${cleaned}==" ;;
+        3) cleaned="${cleaned}=" ;;
+    esac
+    if [[ -n "${cleaned}" ]] && out="$(printf '%s' "${cleaned}" | base64 -d 2>/dev/null)" && [[ -n "${out}" ]]; then
         printf '%s' "${out}"
         return 0
     fi
-    if out="$(printf '%s' "${data}" | base64 -D 2>/dev/null)"; then
+    if [[ -n "${cleaned}" ]] && out="$(printf '%s' "${cleaned}" | base64 -D 2>/dev/null)" && [[ -n "${out}" ]]; then
         printf '%s' "${out}"
         return 0
     fi
-    msg_err "relay: payload base64 解码失败（复制时被截断？）"
+    msg_err "relay: payload base64 解码失败（收到 ${#cleaned} 个有效字符 — 粘贴时被截断？）"
     return 1
 }
 
